@@ -690,6 +690,19 @@ function resultSummaryForIntercom(result: SingleResult): string {
 	return output || result.error || "(no output)";
 }
 
+function formatFailedSingleRunOutput(result: SingleResult, displayOutput: string): string {
+	const error = result.error || "Failed";
+	const output = displayOutput.trim();
+	const lines = [error];
+	if (output && output !== error.trim()) {
+		lines.push("", "Output:", output);
+	}
+	if (result.artifactPaths?.outputPath) {
+		lines.push("", `Output artifact: ${result.artifactPaths.outputPath}`);
+	}
+	return lines.join("\n");
+}
+
 function createForegroundControlNotifier(data: Pick<ExecutionContextData, "controlConfig" | "intercomBridge">, deps: Pick<ExecutorDeps, "pi">): (event: ControlEvent) => void {
 	return (event) => emitControlNotification({
 		pi: deps.pi,
@@ -2160,7 +2173,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	if (r.exitCode !== 0)
 		return {
-			content: [{ type: "text", text: r.error || "Failed" }],
+			content: [{ type: "text", text: formatFailedSingleRunOutput(r, finalizedOutput.displayOutput) }],
 			details,
 			isError: true,
 		};

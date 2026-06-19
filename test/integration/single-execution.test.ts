@@ -213,6 +213,25 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		]);
 	});
 
+	it("returns captured output when the foreground executor fails an implementation run", async () => {
+		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
+		const executor = makeExecutor([makeAgent("oracle")]);
+
+		const result = await executor.execute(
+			"failed-single-output",
+			{ agent: "oracle", task: "Implement the approved file changes" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, true);
+		assert.match(text, /completed without making edits/);
+		assert.match(text, /Output:\nOracle review:\n- finding one\n- finding two/);
+		assert.match(text, /Output artifact: /);
+	});
+
 	it("fails future-tense implementation summaries when no mutation attempt occurred", async () => {
 		mockPi.onCall({ output: "I’ll do that now and report back after implementing." });
 		const agents = [makeAgent("worker")];
