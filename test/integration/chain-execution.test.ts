@@ -1140,8 +1140,8 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 	});
 
 	it("passes completed parallel task outputs to later {outputs.name} references", async () => {
-		mockPi.onCall({ output: "Alpha named output" });
-		mockPi.onCall({ output: "Beta named output" });
+		mockPi.onCall({ matchArgIncludes: "Alpha", output: "Alpha named output" });
+		mockPi.onCall({ matchArgIncludes: "Beta", output: "Beta named output" });
 		mockPi.onCall({ output: "Final" });
 		const agents = [makeAgent("alpha"), makeAgent("beta"), makeAgent("writer")];
 
