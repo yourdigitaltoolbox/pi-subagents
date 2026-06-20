@@ -311,10 +311,10 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.equal((sent[0] as { display?: boolean }).display, true);
 		assert.equal((sent[0] as { content?: string }).content, "inspect this");
 		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
-		assert.equal((sent[1] as { display?: boolean }).display, true);
+		assert.equal((sent[1] as { display?: boolean }).display, false);
 		assert.match((sent[1] as { content?: string }).content ?? "", /Scout finished/);
 		assert.match((sent[1] as { content?: string }).content ?? "", /Child session exports\n\n- `\/tmp\/child-session\.jsonl`/);
-		assert.deepEqual(log, ["send:visible", "status:running...", "send:visible", "status:clear"]);
+		assert.deepEqual(log, ["send:visible", "status:running...", "send:hidden", "status:clear"]);
 
 		const visibleDetails = resolveSlashMessageDetails!((sent[0] as { details?: unknown }).details);
 		assert.ok(visibleDetails);
@@ -400,9 +400,9 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.equal((sent[0] as { display?: boolean }).display, true);
 		assert.equal((sent[0] as { content?: string }).content, "inspect this");
 		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
-		assert.equal((sent[1] as { display?: boolean }).display, true);
+		assert.equal((sent[1] as { display?: boolean }).display, false);
 		assert.match((sent[1] as { content?: string }).content ?? "", /Subagent failed/);
-		assert.deepEqual(log, ["send:visible", "status:running...", "send:visible", "status:clear"]);
+		assert.deepEqual(log, ["send:visible", "status:running...", "send:hidden", "status:clear"]);
 
 		const visibleDetails = resolveSlashMessageDetails!((sent[0] as { details?: unknown }).details);
 		assert.ok(visibleDetails);
@@ -822,6 +822,46 @@ Gather context
 	});
 });
 
+
+describe("subagents-models slash command", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
+	beforeEach(() => {
+		clearSlashSnapshots?.();
+	});
+
+	it("routes to the models tool action", async () => {
+		const { params } = await captureSlashCommandParams("subagents-models", "", process.cwd());
+		assert.deepEqual(params, { action: "models" });
+	});
+
+	it("passes an optional builtin filter", async () => {
+		const { params } = await captureSlashCommandParams("subagents-models", "scout", process.cwd());
+		assert.deepEqual(params, { action: "models", agent: "scout" });
+	});
+
+	it("rejects invalid builtin filters without launching", async () => {
+		const { params, notifications } = await captureSlashCommandParams("subagents-models", "not-a-builtin", process.cwd());
+		assert.equal(params, undefined);
+		assert.deepEqual(notifications, ["Unknown builtin agent: not-a-builtin"]);
+	});
+
+	it("suggests builtin agent names", async () => {
+		await withIsolatedHome(async () => {
+			const commands = new Map<string, RegisteredSlashCommand>();
+			const pi = {
+				events: createEventBus(),
+				registerCommand(name: string, spec: RegisteredSlashCommand) {
+					commands.set(name, spec);
+				},
+				registerShortcut() {},
+				sendMessage(_message: unknown) {},
+			};
+
+			registerSlashCommands!(pi, createState(process.cwd()));
+			const completions = commands.get("subagents-models")!.getArgumentCompletions!("sc") as Array<{ value: string; label: string }>;
+			assert.deepEqual(completions.map((completion) => completion.value), ["scout"]);
+		});
+	});
+});
 
 describe("subagents-doctor slash command", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
 	beforeEach(() => {

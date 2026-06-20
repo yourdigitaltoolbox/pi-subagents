@@ -377,6 +377,70 @@ Drive the failing test first.
 		assert.match(readText(listed), /Invalid JSON chain/);
 	});
 
+	it("reports builtin runtime-loaded model mappings from current session state", () => {
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: {
+				getAvailable: () => [
+					{ provider: "openai", id: "gpt-5-mini" },
+					{ provider: "anthropic", id: "claude-sonnet-4" },
+				],
+			},
+			model: { provider: "openai", id: "gpt-5-mini" },
+		};
+
+		const result = handleManagementAction("models", {}, ctx);
+		const text = readText(result);
+		assert.equal(result.isError, false);
+		assert.match(text, /^Builtin subagent models/m);
+		assert.match(text, /Current session model:\n  openai\/gpt-5-mini/);
+		assert.match(text, /(?:^|\n)scout\n  model:\n    openai\/gpt-5-mini\n  source: inherits current session model(?:\n|$)/);
+	});
+
+	it("reports override source and disabled builtin state in runtime model mappings", () => {
+		const projectSettingsPath = path.join(tempDir, ".pi", "settings.json");
+		fs.mkdirSync(path.dirname(projectSettingsPath), { recursive: true });
+		fs.writeFileSync(projectSettingsPath, JSON.stringify({
+			subagents: {
+				agentOverrides: {
+					reviewer: { model: "claude-sonnet-4", disabled: true },
+				},
+			},
+		}, null, 2), "utf-8");
+
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: {
+				getAvailable: () => [
+					{ provider: "openai", id: "gpt-5-mini" },
+					{ provider: "anthropic", id: "claude-sonnet-4" },
+				],
+			},
+			model: { provider: "openai", id: "gpt-5-mini" },
+		};
+
+		const result = handleManagementAction("models", { agent: "reviewer" }, ctx);
+		const text = readText(result);
+		assert.equal(result.isError, false);
+		assert.match(text, /^Builtin subagent model/m);
+		assert.match(text, /Agent: reviewer/);
+		assert.match(text, /Effective model:\n  anthropic\/claude-sonnet-4/);
+		assert.match(text, /Source: project override/);
+		assert.match(text, /Requested model setting:\n  claude-sonnet-4/);
+		assert.match(text, /Disabled: true/);
+		assert.match(text, /Override file:\n  .*\.pi\/settings\.json/);
+	});
+
+	it("rejects unknown builtin filters for runtime model mappings", () => {
+		const result = handleManagementAction("models", { agent: "not-a-builtin" }, {
+			cwd: tempDir,
+			modelRegistry: { getAvailable: () => [] },
+		});
+
+		assert.equal(result.isError, true);
+		assert.match(readText(result), /Builtin agent 'not-a-builtin' not found/);
+	});
+
 	it("creates delegate with its builtin prompt defaults", () => {
 		const result = handleCreate(
 			{ config: { name: "delegate", description: "Delegate helper", scope: "project" } },

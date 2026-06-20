@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { discoverAgents, discoverAgentsAll, type ChainConfig } from "../agents/agents.ts";
+import { BUILTIN_AGENT_NAMES, discoverAgents, discoverAgentsAll, type ChainConfig } from "../agents/agents.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { isDynamicParallelStep, isParallelStep, type ChainStep } from "../shared/settings.ts";
 import { assertJsonSchemaObject } from "../runs/shared/structured-output.ts";
@@ -123,6 +123,13 @@ const makeChainCompletions = (state: SubagentState) => (prefix: string) => {
 	return discoverSavedChains(state.baseCwd)
 		.filter((chain) => chain.name.startsWith(prefix))
 		.map((chain) => ({ value: chain.name, label: chain.name }));
+};
+
+const makeBuiltinAgentNameCompletions = () => (prefix: string) => {
+	if (prefix.includes(" ")) return null;
+	return BUILTIN_AGENT_NAMES
+		.filter((name) => name.startsWith(prefix))
+		.map((name) => ({ value: name, label: name }));
 };
 
 function loadSavedOutputSchema(chain: ChainConfig, stepAgent: string, outputSchema: unknown): JsonSchemaObject | undefined {
@@ -330,7 +337,7 @@ async function runSlashSubagent(
 		pi.sendMessage({
 			customType: SLASH_RESULT_TYPE,
 			content: buildSlashExportText(response),
-			display: true,
+			display: !ctx.hasUI,
 			details: finalDetails,
 		});
 		persistSlashSessionSnapshot(ctx);
@@ -346,7 +353,7 @@ async function runSlashSubagent(
 		pi.sendMessage({
 			customType: SLASH_RESULT_TYPE,
 			content: `## Subagent result\n\n${message}`,
-			display: true,
+			display: !ctx.hasUI,
 			details: failedDetails,
 		});
 		persistSlashSessionSnapshot(ctx);
@@ -560,6 +567,29 @@ export function registerSlashCommands(
 		description: "Show subagent diagnostics",
 		handler: async (_args, ctx) => {
 			await runSlashSubagent(pi, ctx, { action: "doctor" });
+		},
+	});
+
+	pi.registerCommand("subagents-models", {
+		description: "Show runtime-loaded builtin subagent models",
+		getArgumentCompletions: makeBuiltinAgentNameCompletions(),
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				await runSlashSubagent(pi, ctx, { action: "models" });
+				return;
+			}
+			const parts = trimmed.split(/\s+/).filter(Boolean);
+			if (parts.length !== 1) {
+				ctx.ui.notify("Usage: /subagents-models [builtin-agent-name]", "error");
+				return;
+			}
+			const agent = parts[0]!;
+			if (!(BUILTIN_AGENT_NAMES as readonly string[]).includes(agent)) {
+				ctx.ui.notify(`Unknown builtin agent: ${agent}`, "error");
+				return;
+			}
+			await runSlashSubagent(pi, ctx, { action: "models", agent });
 		},
 	});
 

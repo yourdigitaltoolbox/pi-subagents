@@ -88,6 +88,33 @@ function truncLine(text: string, maxWidth: number): string {
 	return result + activeStyles.join("") + "…";
 }
 
+function wrapPlainText(text: string, maxWidth: number): string[] {
+	if (maxWidth <= 0) return [""];
+	const lines: string[] = [];
+	for (const rawLine of text.split("\n")) {
+		if (rawLine.length === 0) {
+			lines.push("");
+			continue;
+		}
+		let current = "";
+		let currentWidth = 0;
+		for (const seg of segmenter.segment(rawLine)) {
+			const grapheme = seg.segment;
+			const graphemeWidth = visibleWidth(grapheme);
+			if (currentWidth > 0 && currentWidth + graphemeWidth > maxWidth) {
+				lines.push(current);
+				current = grapheme;
+				currentWidth = graphemeWidth;
+				continue;
+			}
+			current += grapheme;
+			currentWidth += graphemeWidth;
+		}
+		lines.push(current);
+	}
+	return lines;
+}
+
 const RUNNING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATIC_RUNNING_GLYPH = "●";
 
@@ -1370,7 +1397,12 @@ export function renderSubagentResult(
 		const t = result.content[0];
 		const text = t?.type === "text" ? t.text : "(no output)";
 		const contextPrefix = d?.context === "fork" ? `${theme.fg("warning", "[fork]")} ` : "";
-		return new Text(truncLine(`${contextPrefix}${text}`, getTermWidth() - 4), 0, 0);
+		const width = getTermWidth() - 4;
+		if (!text.includes("\n")) return new Text(truncLine(`${contextPrefix}${text}`, width), 0, 0);
+		const c = new Container();
+		const wrapped = wrapPlainText(`${contextPrefix}${text}`, width);
+		for (const line of wrapped) c.addChild(new Text(line, 0, 0));
+		return c;
 	}
 
 	const expanded = options.expanded;

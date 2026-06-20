@@ -22,6 +22,17 @@ export type AgentSource = "builtin" | "package" | "user" | "project";
 type SystemPromptMode = "append" | "replace";
 export type AgentDefaultContext = "fresh" | "fork";
 
+export const BUILTIN_AGENT_NAMES = [
+	"context-builder",
+	"delegate",
+	"oracle",
+	"planner",
+	"researcher",
+	"reviewer",
+	"scout",
+	"worker",
+] as const;
+
 export function defaultSystemPromptMode(name: string): SystemPromptMode {
 	return name === "delegate" ? "append" : "replace";
 }

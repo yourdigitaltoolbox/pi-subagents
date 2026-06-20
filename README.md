@@ -145,6 +145,15 @@ Use `~/.pi/agent/settings.json` for a user override or `.pi/settings.json` for a
 
 If your provider rejects model IDs with thinking suffixes, set `subagents.disableThinking: true` in user or project settings. That clears bundled builtin thinking defaults in one place; an explicit higher-precedence `agentOverrides.<name>.thinking` value can opt a role back in.
 
+To inspect what `pi-subagents` has actually loaded right now, use:
+
+```text
+/subagents-models
+/subagents-models reviewer
+```
+
+That reports the live runtime mapping, which can differ from settings on disk until you reload Pi.
+
 ## Where running subagents show up
 
 Foreground runs stream progress in the conversation while they run.
@@ -250,6 +259,7 @@ Skip this section until you want exact syntax.
 | `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel |
 | `/run-chain <chainName> -- <task>` | Launch a saved `.chain.md` or `.chain.json` workflow |
 | `/subagents-doctor` | Show read-only setup diagnostics |
+| `/subagents-models [agent]` | Show the runtime-loaded builtin model mapping, optionally filtered to one builtin |
 
 Commands validate agent names locally, support tab completion, and send results back into the conversation.
 
@@ -757,6 +767,8 @@ Agent definitions are not loaded into context by default. Management actions let
 { action: "list" }
 { action: "list", agentScope: "project" }
 { action: "get", agent: "scout" }
+{ action: "models" }
+{ action: "models", agent: "reviewer" }
 { action: "get", agent: "code-analysis.scout" }
 { action: "get", chainName: "review-pipeline" }
 
