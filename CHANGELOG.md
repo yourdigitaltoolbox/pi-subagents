@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-06-20
+
 ### Added
 - Allow active async chains to accept an `append-step` request that adds one new tail step while the chain is still running.
 - Allow async subagent results to be attached as the root step of a new follow-up chain.
