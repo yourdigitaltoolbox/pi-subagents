@@ -42,6 +42,8 @@ const PROMPT_WITH_EXPLICIT_SKILL = [
 	"\nCurrent date: 2026-04-16",
 ].join("");
 
+const CONFIGURED_SKILLS_SECTION = "\n\nThe following configured skills are available to this subagent.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>configured-skill</name>\n    <description>explicit agent skill</description>\n    <location>/tmp/configured-skill/SKILL.md</location>\n  </skill>\n</available_skills>";
+
 afterEach(() => {
 	if (envSnapshot.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT === undefined) delete process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT;
 	else process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = envSnapshot.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT;
@@ -155,6 +157,25 @@ describe("subagent prompt runtime", () => {
 		});
 		assert.ok(rewritten.includes("<skill name=\"explicit\">"));
 		assert.ok(!rewritten.includes("<available_skills>"));
+		assert.ok(!rewritten.includes("# Project Context"));
+	});
+
+	it("keeps configured lazy skill references when inherited skills are stripped", () => {
+		const prompt = [
+			"You are a subagent.",
+			CONFIGURED_SKILLS_SECTION,
+			"\n\n# Project Context\n\nProject-specific instructions and guidelines:\n\n## /repo/AGENTS.md\n\nProject rules\n\n",
+			SKILLS_SECTION,
+			"\nCurrent date: 2026-04-16",
+		].join("");
+		const rewritten = rewriteSubagentPrompt(prompt, {
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.ok(rewritten.includes("<name>configured-skill</name>"));
+		assert.ok(rewritten.includes("/tmp/configured-skill/SKILL.md"));
+		assert.ok(!rewritten.includes("<name>safe-bash</name>"));
 		assert.ok(!rewritten.includes("# Project Context"));
 	});
 

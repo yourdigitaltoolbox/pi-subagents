@@ -36,7 +36,7 @@ const SkillOverride = Type.Unsafe({
 		{ type: "boolean" },
 		{ type: "string" },
 	],
-	description: "Skill name(s) to inject (comma-separated), array of strings, or boolean (false disables, true uses default)",
+	description: "Skill name(s) to make available (comma-separated), array of strings, or boolean (false disables, true uses default)",
 });
 
 const OutputOverride = Type.Unsafe({

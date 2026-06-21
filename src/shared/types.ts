@@ -785,7 +785,7 @@ export interface RunSyncOptions {
 	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Current parent-session provider to prefer for ambiguous bare model ids */
 	preferredModelProvider?: string;
-	/** Skills to inject (overrides agent default if provided) */
+	/** Skills to make available (overrides agent default if provided) */
 	skills?: string[];
 	structuredOutput?: {
 		schema: JsonSchemaObject;

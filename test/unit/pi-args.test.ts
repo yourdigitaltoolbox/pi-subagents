@@ -300,6 +300,34 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(toolsArg, "read,grep,find,ls,bash,edit,write,contact_supervisor");
 	});
 
+	it("adds read to explicit tool allowlists when skills must be loaded lazily", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			requireReadTool: true,
+			tools: ["bash"],
+		});
+
+		assert.equal(args[args.indexOf("--tools") + 1], "read,bash");
+	});
+
+	it("does not duplicate read in explicit tool allowlists for lazy skills", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			requireReadTool: true,
+			tools: ["read", "bash"],
+		});
+
+		assert.equal(args[args.indexOf("--tools") + 1], "read,bash");
+	});
+
 	it("augments explicit builtin allowlists with selected direct MCP tool names", () => {
 		const fixture = createMcpFixture();
 		writeMcpFixture(fixture);

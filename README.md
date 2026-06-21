@@ -298,7 +298,7 @@ Append `[key=value,...]` to an agent name to override defaults for that step:
 | `outputMode` | `outputMode=file-only` | Return only a concise file reference for saved output instead of the full saved content. Requires `output`; default is `inline`. |
 | `reads` | `reads=a.md+b.md` | Read files before executing. `+` separates multiple paths. |
 | `model` | `model=anthropic/claude-sonnet-4` | Override model for this step. |
-| `skills` | `skills=planning+review` | Override injected skills. `+` separates multiple skills. |
+| `skills` | `skills=planning+review` | Override available skills. `+` separates multiple skills. |
 | `progress` | `progress` | Enable progress tracking. |
 
 Set `output=false`, `reads=false`, or `skills=false` to disable that behavior explicitly. Do not use `output=false` for file-only returns; use `outputMode=file-only` with an `output` path.
@@ -462,7 +462,7 @@ Important fields:
 | `inheritProjectContext` | Keeps or strips inherited project instruction blocks. |
 | `inheritSkills` | Keeps or strips Pi’s discovered skills catalog. |
 | `defaultContext` | Optional `fresh` or `fork` launch context default for this agent. |
-| `skills` | Injects specific skills directly, regardless of `inheritSkills`. |
+| `skills` | Adds specific skills to the child’s available skill list, regardless of `inheritSkills`. |
 | `output` | Default single-agent output file. |
 | `defaultReads` | Files to read before running in chain/parallel behavior. |
 | `defaultProgress` | Maintain `progress.md`. |
@@ -609,7 +609,7 @@ Parallel outputs are aggregated with clear separators before being passed to the
 
 ## Skills
 
-Skills are `SKILL.md` files injected into an agent’s system prompt.
+Skills are `SKILL.md` files made available to an agent. The prompt includes skill metadata and the file location; the agent reads the full skill file only when the task matches.
 
 Discovery uses project-first precedence:
 
@@ -631,13 +631,23 @@ Use agent defaults, override them at runtime, or disable them:
 
 For chains, `skill` at the top level is additive. A step-level `skill` overrides that step; `false` disables skills for that step.
 
-Injected skills use this shape:
+Available skills use this shape:
 
 ```xml
-<skill name="safe-bash">
-[skill content from SKILL.md, frontmatter stripped]
-</skill>
+The following configured skills are available to this subagent.
+Use the read tool to load a skill's file when the task matches its description.
+When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
+
+<available_skills>
+  <skill>
+    <name>safe-bash</name>
+    <description>Run shell commands safely.</description>
+    <location>/absolute/path/to/safe-bash/SKILL.md</location>
+  </skill>
+</available_skills>
 ```
+
+If an agent has an explicit `tools` allowlist and resolved skills, `read` is added for that child run so the listed skill files can be loaded on demand.
 
 Missing skills do not fail execution. The result summary shows a warning.
 

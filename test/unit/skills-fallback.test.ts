@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
+	buildSkillInjection,
 	clearSkillCache,
 	discoverAvailableSkills,
 	resolveSkills,
@@ -13,12 +14,12 @@ import {
 
 let tempDir = "";
 
-function makeProjectSkill(cwd: string, name: string, body: string): void {
+function makeProjectSkill(cwd: string, name: string, body: string, description = "Test description"): void {
 	const skillDir = path.join(cwd, ".pi", "skills", name);
 	fs.mkdirSync(skillDir, { recursive: true });
 	fs.writeFileSync(
 		path.join(skillDir, "SKILL.md"),
-		`---\ndescription: Test description\n---\n\n${body}\n`,
+		`---\ndescription: ${description}\n---\n\n${body}\n`,
 		"utf-8",
 	);
 }
@@ -76,6 +77,33 @@ describe("skills filesystem fallback", () => {
 		assert.equal(resolved[0]?.name, "resolve-skill");
 		assert.equal(resolved[0]?.source, "project");
 		assert.match(resolved[0]?.content ?? "", /Run local fallback checks\./);
+	});
+
+	it("builds lazy skill references instead of inlining full skill bodies", () => {
+		makeProjectSkill(tempDir, "lazy-skill", "This body should stay out of the system prompt.");
+
+		const { resolved, missing } = resolveSkills(["lazy-skill"], tempDir);
+		assert.deepEqual(missing, []);
+
+		const injection = buildSkillInjection(resolved);
+		assert.match(injection, /The following configured skills are available to this subagent/);
+		assert.match(injection, /Use the read tool to load a skill's file/);
+		assert.match(injection, /<available_skills>/);
+		assert.match(injection, /<name>lazy-skill<\/name>/);
+		assert.match(injection, /<description>Test description<\/description>/);
+		assert.match(injection, /<location>.*lazy-skill.*SKILL\.md<\/location>/);
+		assert.doesNotMatch(injection, /This body should stay out/);
+		assert.doesNotMatch(injection, /<skill name=/);
+	});
+
+	it("escapes XML-sensitive skill metadata in lazy references", () => {
+		makeProjectSkill(tempDir, "amp&skill", "Body", "Use A & B <carefully>");
+
+		const { resolved } = resolveSkills(["amp&skill"], tempDir);
+		const injection = buildSkillInjection(resolved);
+		assert.match(injection, /<name>amp&amp;skill<\/name>/);
+		assert.match(injection, /<description>Use A &amp; B &lt;carefully&gt;<\/description>/);
+		assert.match(injection, /amp&amp;skill[\\/]SKILL\.md/);
 	});
 
 	it("does not expose pi-subagents as a child-injectable skill", () => {
