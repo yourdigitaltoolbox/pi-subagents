@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Keep crowded async subagent widgets at a stable collapsed height in short terminals, reducing destructive full-screen TUI redraws and flicker. Thanks to ssyram (@ssyram) for #186.
+
 ## [0.30.0] - 2026-06-20
 
 ### Added
