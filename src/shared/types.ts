@@ -391,6 +391,7 @@ export interface SingleResult {
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
+	timedOut?: boolean;
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
@@ -757,6 +758,8 @@ export interface RunSyncOptions {
 	cwd?: string;
 	signal?: AbortSignal;
 	interruptSignal?: AbortSignal;
+	timeoutMs?: number;
+	deadlineAt?: number;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;

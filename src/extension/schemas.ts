@@ -303,6 +303,8 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent directory for chain artifacts. Default: a user-scoped temp directory under <tmpdir>/ (auto-cleaned after 24h)" })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Foreground execution timeout in milliseconds. Alias of maxRuntimeMs; unsupported with async: true." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Foreground execution timeout in milliseconds. Alias of timeoutMs; unsupported with async: true." })),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
 	cwd: Type.Optional(Type.String()),
 	artifacts: Type.Optional(Type.Boolean({ description: "Write debug artifacts (default: true)" })),

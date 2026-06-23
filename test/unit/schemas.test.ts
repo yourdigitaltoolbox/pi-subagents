@@ -24,6 +24,14 @@ interface SubagentParamsSchema {
 			minimum?: number;
 			description?: string;
 		};
+		timeoutMs?: {
+			minimum?: number;
+			description?: string;
+		};
+		maxRuntimeMs?: {
+			minimum?: number;
+			description?: string;
+		};
 		id?: {
 			type?: string;
 			description?: string;
@@ -158,6 +166,17 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(description, /Management\/control action/);
 		assert.match(description, /Omit for execution mode/);
 		assert.doesNotMatch(description, /orchestration\./);
+	});
+
+	it("includes foreground timeout aliases", () => {
+		const timeoutSchema = SubagentParams?.properties?.timeoutMs;
+		const maxRuntimeSchema = SubagentParams?.properties?.maxRuntimeMs;
+		assert.ok(timeoutSchema, "timeoutMs schema should exist");
+		assert.ok(maxRuntimeSchema, "maxRuntimeMs schema should exist");
+		assert.equal(timeoutSchema.minimum, 1);
+		assert.equal(maxRuntimeSchema.minimum, 1);
+		assert.match(String(timeoutSchema.description ?? ""), /foreground/i);
+		assert.match(String(maxRuntimeSchema.description ?? ""), /timeoutMs/i);
 	});
 
 	it("includes subagent control fields", () => {
@@ -413,6 +432,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ chain: [{ parallel: [{ agent: "reviewer", output: "review.md", reads: ["input.md"], skill: "review" }] }] },
 			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 }, parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } }, collect: { as: "reviews" } }] },
 			{ agent: "worker", task: "Fix", acceptance: false },
+			{ agent: "worker", task: "Fix", timeoutMs: 1000 },
+			{ tasks: [{ agent: "worker", task: "Fix" }], maxRuntimeMs: 1000 },
+			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000, maxRuntimeMs: 1000 },
 			{ agent: "worker", task: "Fix", acceptance: { level: "checked", review: false } },
 			{ tasks: [{ agent: "worker", task: "Fix", acceptance: false }] },
 			{ chain: [{ agent: "worker", acceptance: { level: "checked" } }] },
@@ -425,6 +447,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ skill: 123 },
 			{ skill: [123] },
 			{ output: 123 },
+			{ timeoutMs: 0 },
+			{ maxRuntimeMs: -1 },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: "input.md" }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", output: 123 }] }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", reads: "input.md" }] }] },

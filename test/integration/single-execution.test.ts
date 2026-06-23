@@ -76,6 +76,7 @@ interface RunSyncResult {
 	artifactPaths?: ArtifactPaths;
 	finalOutput?: string;
 	interrupted?: boolean;
+	timedOut?: boolean;
 	detached?: boolean;
 	detachedReason?: string;
 	savedOutputPath?: string;
@@ -83,6 +84,11 @@ interface RunSyncResult {
 	outputReference?: { path: string; bytes: number; lines: number; message: string };
 	outputSaveError?: string;
 	sessionFile?: string;
+	acceptance?: {
+		status?: string;
+		verifyRuns?: Array<{ status?: string }>;
+		runtimeChecks?: Array<{ id?: string; status?: string; message?: string }>;
+	};
 }
 
 interface ExecutionModule {
@@ -923,6 +929,38 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.doesNotMatch(readCallArgs().at(-1) ?? "", /Write your findings to:/);
 	});
 
+	it("rejects mismatched foreground timeout aliases before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"timeout-alias-validation",
+			{ agent: "echo", task: "Task", timeoutMs: 100, maxRuntimeMs: 200 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /aliases/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("rejects foreground timeout settings for async runs before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"timeout-async-validation",
+			{ agent: "echo", task: "Task", async: true, timeoutMs: 100 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /foreground runs/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
 	it("rejects file-only mode without an output path before spawning", async () => {
 		const agents = makeAgentConfigs(["echo"]);
 
@@ -1207,6 +1245,64 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		// Exit code is platform-dependent (Windows: often 1 or 0, Linux: null/143)
 	});
 
+	it("marks foreground runs that exceed timeoutMs as timed out", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+
+		const start = Date.now();
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			timeoutMs: 150,
+		});
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should time out early, took ${elapsed}ms`);
+		assert.notEqual(result.exitCode, 0);
+		assert.equal(result.timedOut, true);
+		assert.equal(result.error, "Subagent timed out after 150ms.");
+		assert.match(result.finalOutput ?? "", /Subagent timed out after 150ms\./);
+		assert.equal(result.progress.status, "failed");
+	});
+
+	it("does not run acceptance verification after a foreground timeout", async () => {
+		const markerPath = path.join(tempDir, "verify-ran.txt");
+		const report = [
+			"done",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "integration test evidence" }],
+				changedFiles: ["src/a.ts"],
+				testsAddedOrUpdated: ["test/a.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["validation passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+				notes: "complete",
+			}),
+			"```",
+		].join("\n");
+		mockPi.onCall({ jsonl: [events.assistantMessage(report)], keepAliveAfterFinalMessageMs: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			timeoutMs: 150,
+			acceptance: {
+				level: "verified",
+				verify: [{
+					id: "marker",
+					command: "node -e \"require('node:fs').writeFileSync(process.env.VERIFY_MARKER, 'ran')\"",
+					env: { VERIFY_MARKER: markerPath },
+					timeoutMs: 10_000,
+				}],
+			},
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.acceptance?.status, "rejected");
+		assert.equal(result.acceptance?.runtimeChecks?.[0]?.id, "timeout");
+		assert.equal(result.acceptance?.verifyRuns?.length, 0);
+		assert.equal(fs.existsSync(markerPath), false);
+	});
+
 	it("soft-interrupts the current turn and returns a paused result", async () => {
 		mockPi.onCall({ delay: 10000 });
 		const agents = makeAgentConfigs(["slow"]);
@@ -1230,6 +1326,24 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.interrupted, true);
 		assert.equal(result.progress.activityState, undefined);
 		assert.deepEqual(controlEvents, []);
+		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
+	it("preserves manual interrupt semantics when a timeout is also configured", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+		const controller = new AbortController();
+
+		setTimeout(() => controller.abort(), 100);
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			interruptSignal: controller.signal,
+			timeoutMs: 500,
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.interrupted, true);
+		assert.equal(result.timedOut, undefined);
+		assert.equal(result.error, undefined);
 		assert.match(result.finalOutput ?? "", /Interrupted/);
 	});
 

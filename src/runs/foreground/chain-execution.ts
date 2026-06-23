@@ -136,6 +136,8 @@ interface ParallelChainRunInput {
 	worktreeSetup?: WorktreeSetup;
 	maxSubagentDepth: number;
 	nestedRoute?: NestedRouteInfo;
+	timeoutMs?: number;
+	deadlineAt?: number;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -293,6 +295,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
 				acceptanceContext: { mode: "chain" },
+				timeoutMs: input.timeoutMs,
+				deadlineAt: input.deadlineAt,
 				onUpdate: input.onUpdate
 					? (progressUpdate) => {
 						const stepResults = progressUpdate.details?.results || [];
@@ -395,6 +399,8 @@ interface ChainExecutionParams {
 	nestedRoute?: NestedRouteInfo;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
+	timeoutMs?: number;
+	deadlineAt?: number;
 }
 
 interface ChainExecutionResult {
@@ -584,6 +590,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		tuiBehaviorOverrides = result.behaviorOverrides;
 	}
 
+	const deadlineAt = params.deadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	let prev = "";
 	let globalTaskIndex = 0;
 	let progressCreated = false;
@@ -670,6 +677,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					nestedRoute: params.nestedRoute,
 					worktreeSetup,
 					maxSubagentDepth: params.maxSubagentDepth,
+					timeoutMs: params.timeoutMs,
+					deadlineAt,
 				});
 				globalTaskIndex += step.parallel.length;
 
@@ -739,6 +748,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 						output: getSingleResultOutput(result),
 						exitCode: result.exitCode,
 						error: result.error,
+						timedOut: result.timedOut,
 						outputTargetPath,
 						outputTargetExists: outputTargetPath ? fs.existsSync(outputTargetPath) : undefined,
 					};
@@ -875,6 +885,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				foregroundControl,
 				nestedRoute: params.nestedRoute,
 				maxSubagentDepth: params.maxSubagentDepth,
+				timeoutMs: params.timeoutMs,
+				deadlineAt,
 			});
 			globalTaskIndex += dynamicParallelStep.parallel.length;
 
@@ -970,6 +982,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				output: getSingleResultOutput(result),
 				exitCode: result.exitCode,
 				error: result.error,
+				timedOut: result.timedOut,
 			}));
 			prev = aggregateParallelOutputs(taskResults, (i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${materialized.items[i]?.key ?? i}) ===`);
 		} else {
@@ -1081,6 +1094,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				structuredOutput: structuredRuntime,
 				acceptance: seqStep.acceptance,
 				acceptanceContext: { mode: "chain" },
+				timeoutMs: params.timeoutMs,
+				deadlineAt,
 				onUpdate: onUpdate
 					? (p) => {
 						const stepResults = p.details?.results || [];
