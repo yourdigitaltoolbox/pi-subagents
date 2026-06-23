@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Actually wire the previously documented foreground-only `timeoutMs`/`maxRuntimeMs` aliases through single, parallel, chain, and dynamic fanout runs, including stable `timedOut: true` results, preserved partial output, manual-interrupt precedence, and skipped acceptance verification after timeout.
+
 ## [0.30.0] - 2026-06-20
 
 ### Added
