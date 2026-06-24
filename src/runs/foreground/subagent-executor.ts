@@ -2654,6 +2654,23 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	};
 }
 
+function inferExecutionMode(params: SubagentParamsLike): SubagentRunMode {
+	if ((params.chain?.length ?? 0) > 0) return "chain";
+	if ((params.tasks?.length ?? 0) > 0) return "parallel";
+	return "single";
+}
+
+function duplicateSubagentCallResult(params: SubagentParamsLike): AgentToolResult<Details> {
+	return {
+		content: [{
+			type: "text",
+			text: "Rejected: a subagent call is already in progress. Issue exactly ONE subagent call per turn.",
+		}],
+		isError: true,
+		details: { mode: inferExecutionMode(params), results: [] },
+	};
+}
+
 export function createSubagentExecutor(deps: ExecutorDeps): {
 	execute: (
 		id: string,
@@ -3065,5 +3082,22 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		}, effectiveParams.context);
 	};
 
-	return { execute };
+	const executeWithSingleDispatchGuard = async (
+		id: string,
+		params: SubagentParamsLike,
+		signal: AbortSignal,
+		onUpdate: ((r: AgentToolResult<Details>) => void) | undefined,
+		ctx: ExtensionContext,
+	): Promise<AgentToolResult<Details>> => {
+		if (params.action) return execute(id, params, signal, onUpdate, ctx);
+		if (deps.state.subagentInProgress === true) return duplicateSubagentCallResult(params);
+		deps.state.subagentInProgress = true;
+		try {
+			return await execute(id, params, signal, onUpdate, ctx);
+		} finally {
+			deps.state.subagentInProgress = false;
+		}
+	};
+
+	return { execute: executeWithSingleDispatchGuard };
 }

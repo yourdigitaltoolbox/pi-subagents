@@ -210,6 +210,53 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(output, "Hello from mock agent");
 	});
 
+	it("rejects duplicate concurrent subagent execution calls", async () => {
+		mockPi.onCall({ output: "first call completed", delay: 100 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const ctx = makeMinimalCtx(tempDir);
+
+		const first = executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+		const second = await executor.execute("second", { agent: "echo", task: "Duplicate call" }, new AbortController().signal, undefined, ctx);
+		const firstResult = await first;
+
+		assert.equal(firstResult.isError, undefined);
+		assert.equal(second.isError, true);
+		assert.match(second.content[0]?.text ?? "", /Issue exactly ONE subagent call per turn/);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("allows management actions while an execution call is in progress", async () => {
+		mockPi.onCall({ output: "first call completed", delay: 100 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const ctx = makeMinimalCtx(tempDir);
+
+		const first = executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+		const status = await executor.execute("status", { action: "status" }, new AbortController().signal, undefined, ctx);
+		const firstResult = await first;
+
+		assert.equal(firstResult.isError, undefined);
+		assert.equal(status.isError, undefined);
+		assert.doesNotMatch(status.content[0]?.text ?? "", /Rejected: a subagent call is already in progress/);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("allows intentional parallel tasks inside one subagent execution call", async () => {
+		mockPi.onCall({ output: "first parallel result" });
+		mockPi.onCall({ output: "second parallel result" });
+		const executor = makeExecutor([makeAgent("echo"), makeAgent("second")]);
+
+		const result = await executor.execute(
+			"parallel",
+			{ tasks: [{ agent: "echo", task: "First task" }, { agent: "second", task: "Second task" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
 	it("fails implementation runs that complete without mutation attempts", async () => {
 		mockPi.onCall({ output: "Validation:\nlet rawFilename = params.filename.trim();" });
 		const agents = [makeAgent("worker")];

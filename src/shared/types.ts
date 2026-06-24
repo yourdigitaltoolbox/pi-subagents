@@ -682,6 +682,7 @@ export interface ForegroundResumeRun {
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
+	subagentInProgress?: boolean;
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
 	foregroundControls: Map<string, {

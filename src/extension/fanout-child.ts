@@ -30,6 +30,7 @@ function createChildSafeState(): SubagentState {
 	return {
 		baseCwd: "",
 		currentSessionId: null,
+		subagentInProgress: false,
 		asyncJobs: new Map(),
 		foregroundRuns: new Map(),
 		foregroundControls: new Map(),
