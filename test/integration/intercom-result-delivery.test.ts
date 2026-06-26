@@ -354,7 +354,10 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 
 			assert.equal(result.isError, undefined);
 			assert.match(result.content[0]?.text ?? "", /Interrupted live async child, then delivered follow-up/);
-			assert.deepEqual(kills, [{ pid: process.pid, signal: process.platform === "win32" ? "SIGBREAK" : "SIGUSR2" }]);
+			assert.deepEqual(kills, [
+				{ pid: process.pid, signal: 0 },
+				{ pid: process.pid, signal: process.platform === "win32" ? "SIGBREAK" : "SIGUSR2" },
+			]);
 			const payload = events.emitted.find((entry) => entry.channel === "subagent:result-intercom")?.payload as { to?: string; message?: string } | undefined;
 			assert.equal(payload?.to, `subagent-worker-${runId}-1`);
 			assert.match(payload?.message ?? "", /Can you clarify the last change\?/);

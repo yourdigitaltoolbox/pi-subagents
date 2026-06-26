@@ -71,11 +71,22 @@ describe("profiles helpers", () => {
 		assert.equal(written.subagents.agentOverrides.scout.model, "openai-codex/gpt-5.3-codex-spark");
 	});
 
+	it("rejects profile and provider path traversal names", async () => {
+		assert.throws(() => applySubagentProfile("../escape"), /safe file name/);
+		assert.throws(() => getProviderModelsPath("../escape"), /safe file name/);
+		await assert.rejects(
+			refreshProviderModelCatalog({ exec: async () => ({ stdout: "OK\n", stderr: "", code: 0, killed: false }) }, makeCtx(process.cwd(), []) as never, "../escape"),
+			/safe file name/,
+		);
+	});
+
 	it("refreshes a provider model catalog and writes a cache file", async () => {
 		const execCalls: string[] = [];
+		const execCwds: unknown[] = [];
 		const pi = {
-			exec: async (_command: string, args: string[]) => {
+			exec: async (_command: string, args: string[], options?: Record<string, unknown>) => {
 				execCalls.push(args.join(" "));
+				execCwds.push(options?.cwd);
 				return { stdout: "OK\n", stderr: "", code: 0, killed: false };
 			},
 		};
@@ -91,6 +102,9 @@ describe("profiles helpers", () => {
 		assert.equal(fs.existsSync(result.filePath), true);
 		assert.equal(result.catalog.models.length, 4);
 		assert.equal(execCalls.length, 4);
+		assert.equal(execCalls.every((call) => call.includes("--no-tools")), true);
+		assert.equal(execCalls.some((call) => call.includes("--tools read")), false);
+		assert.deepEqual(execCwds, [os.tmpdir(), os.tmpdir(), os.tmpdir(), os.tmpdir()]);
 		assert.deepEqual(result.catalog.models.map((entry) => entry.fullId), [
 			"openai-codex/gpt-5.3-codex-spark",
 			"openai-codex/gpt-5.4-mini",
@@ -260,5 +274,26 @@ describe("profiles helpers", () => {
 				probe: { status: "unavailable", message: "model unavailable" },
 			},
 		]);
+	});
+
+	it("checks short model ids and thinking suffixes against the registry", async () => {
+		const profilesDir = getSubagentProfilesDir();
+		fs.mkdirSync(profilesDir, { recursive: true });
+		fs.writeFileSync(path.join(profilesDir, "demo.json"), JSON.stringify({
+			subagents: { agentOverrides: { scout: { model: "gpt-5.3-codex-spark:high" } } },
+		}, null, 2));
+		const probedModels: unknown[] = [];
+		const pi = {
+			exec: async (_command: string, args: string[]) => {
+				probedModels.push(args[2]);
+				assert.equal(args.includes("--no-tools"), true);
+				assert.equal(args.includes("--tools"), false);
+				return { stdout: "OK\n", stderr: "", code: 0, killed: false };
+			},
+		};
+		const ctx = makeCtx(process.cwd(), [{ provider: "openai-codex", id: "gpt-5.3-codex-spark" }]);
+		const result = await checkSubagentProfile(pi, ctx as never, "demo");
+		assert.equal(result.results[0]?.inRegistry, true);
+		assert.deepEqual(probedModels, ["openai-codex/gpt-5.3-codex-spark:high"]);
 	});
 });

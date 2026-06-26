@@ -15,6 +15,7 @@ import {
 } from "../profiles/profiles.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { isDynamicParallelStep, isParallelStep, type ChainStep } from "../shared/settings.ts";
+import { findModelInfo, toModelInfo } from "../shared/model-info.ts";
 import { assertJsonSchemaObject } from "../runs/shared/structured-output.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
@@ -133,8 +134,18 @@ const makeAgentCompletions = (state: SubagentState, multiAgent: boolean) => (pre
 		if (inDouble) { if (ch === '"') inDouble = false; continue; }
 		if (ch === "'") { inSingle = true; continue; }
 		if (ch === '"') { inDouble = true; continue; }
-		if (ch === "(") { depth++; segStart = i + 1; }
-		else if (ch === ")") { if (depth > 0) depth--; segStart = i + 1; }
+		if (ch === "(") {
+			if (!prefix.slice(segStart, i).includes(" -- ")) {
+				depth++;
+				segStart = i + 1;
+			}
+		}
+		else if (ch === ")") {
+			if (depth > 0) {
+				depth--;
+				segStart = i + 1;
+			}
+		}
 		else if (ch === "|" && depth > 0) segStart = i + 1;
 		else if (ch === ">" && prefix[i - 1] === "-" && depth === 0) segStart = i + 1;
 	}
@@ -258,6 +269,7 @@ const mapSavedChainSteps = (chain: ChainConfig, worktree = false): ChainStep[] =
 			...(step.label ? { label: step.label } : {}),
 			...(step.as ? { as: step.as } : {}),
 			...(outputSchema ? { outputSchema } : {}),
+			...((step as { acceptance?: unknown }).acceptance !== undefined ? { acceptance: (step as { acceptance?: unknown }).acceptance } : {}),
 			output: step.output,
 			outputMode: step.outputMode,
 			reads: step.reads,
@@ -710,6 +722,16 @@ type ChainStepObject = {
 	acceptance?: string;
 };
 
+const INLINE_ACCEPTANCE_LEVELS = new Set(["auto", "attested", "checked"]);
+
+function validateInlineAcceptanceInput(value: string, agent: string): void {
+	const errors = validateAcceptanceInput(value, `acceptance for step '${agent}'`);
+	if (errors.length > 0) throw new SlashParseError(errors[0]!);
+	if (!INLINE_ACCEPTANCE_LEVELS.has(value)) {
+		throw new SlashParseError(`Inline acceptance for step '${agent}' supports auto, attested, or checked. Use the subagent tool API or a saved .chain.json file for none, verified, or reviewed acceptance contracts.`);
+	}
+}
+
 // Load an inline `outputSchema=<path>` JSON file, resolved against the session cwd.
 // Throws (SlashParseError / fs / JSON) on a missing or malformed schema.
 function loadInlineOutputSchema(baseCwd: string, agent: string, value: string): JsonSchemaObject {
@@ -734,10 +756,7 @@ const mapParsedTaskToStepObject = (
 	opts: { baseCwd: string; inGroup: boolean },
 ): ChainStepObject => {
 	const { name, config, task: stepTask } = step;
-	if (config.acceptance !== undefined) {
-		const errors = validateAcceptanceInput(config.acceptance, `acceptance for step '${name}'`);
-		if (errors.length > 0) throw new SlashParseError(errors[0]!);
-	}
+	if (config.acceptance !== undefined) validateInlineAcceptanceInput(config.acceptance, name);
 	return {
 		agent: name,
 		...(stepTask ? { task: stepTask } : isFirst && fallbackTask ? { task: fallbackTask } : {}),
@@ -1011,21 +1030,19 @@ export function registerSlashCommands(
 						`Updated: ${result.settingsPath}`,
 					];
 
-					if (workerModel && typeof pi.setModel === "function" && typeof ctx.modelRegistry?.find === "function") {
+					if (workerModel && typeof pi.setModel === "function" && typeof ctx.modelRegistry?.find === "function" && typeof ctx.modelRegistry?.getAvailable === "function") {
 						const shouldSwitch = await ctx.ui.confirm(
 							"",
 							`Profile loaded. Also switch this session to the profile worker model?\n\n${workerModel}`,
 						);
 						if (shouldSwitch) {
-							const slash = workerModel.indexOf("/");
-							const provider = slash === -1 ? "" : workerModel.slice(0, slash);
-							const id = slash === -1 ? workerModel : workerModel.slice(slash + 1);
-							const model = provider && id ? ctx.modelRegistry.find(provider, id) : undefined;
-							if (!model) {
+							const modelInfo = findModelInfo(workerModel, ctx.modelRegistry.getAvailable().map(toModelInfo));
+							const model = modelInfo ? ctx.modelRegistry.find(modelInfo.provider, modelInfo.id) : undefined;
+							if (!modelInfo || !model) {
 								lines.push(`Could not switch current session model: '${workerModel}' is not available in the current model registry.`);
 							} else {
 								const success = await pi.setModel(model);
-								if (success) lines.push(`Current session model switched to: ${workerModel}`);
+								if (success) lines.push(`Current session model switched to: ${modelInfo.fullId}`);
 								else lines.push(`Could not switch current session model to '${workerModel}': no API key or provider access is available.`);
 							}
 						}

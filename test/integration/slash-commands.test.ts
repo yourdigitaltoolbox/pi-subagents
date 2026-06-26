@@ -537,10 +537,16 @@ Write
 				assert.deepEqual(runCompletions.map((completion) => completion.value), ["code-analysis.scout"]);
 				const chainCompletions = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout \"Scan\" -> doc") as Array<{ value: string; label: string }>;
 				assert.deepEqual(chainCompletions.map((completion) => completion.value), ["code-analysis.scout \"Scan\" -> documentation.writer"]);
-				// Regression: a bare `|` inside a `--` shared task is plain text, not a group
-				// separator, so it must not resume agent completion past the task.
+				// Regression: bare group-ish syntax inside a `--` shared task is plain text, not
+				// a group separator, so it must not resume agent completion past the task.
 				const pipeInTask = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout -- do x | doc");
 				assert.equal(pipeInTask, null);
+				const openParenInTask = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout -- do (doc");
+				assert.equal(openParenInTask, null);
+				const closeParenInTask = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout -- do ) doc");
+				assert.equal(closeParenInTask, null);
+				const balancedParenInTask = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout -- do (x) doc");
+				assert.equal(balancedParenInTask, null);
 				// Inside an actual parallel group, `|` still separates tasks and completes agents.
 				const groupCompletions = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout \"Scan\" -> (documentation.writer \"w\" | code") as Array<{ value: string; label: string }>;
 				assert.deepEqual(groupCompletions.map((completion) => completion.value), ["code-analysis.scout \"Scan\" -> (documentation.writer \"w\" | code-analysis.scout"]);
@@ -610,6 +616,31 @@ Review {previous}
 			assert.equal(runParams.chain?.[0]?.agent, "scout");
 			assert.deepEqual(runParams.chain?.[1]?.expand, { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 });
 			assert.deepEqual(runParams.chain?.[1]?.collect, { as: "reviews" });
+		});
+	});
+
+	it("/run-chain preserves saved JSON chain acceptance contracts", async () => {
+		await withTempProject("pi-run-chain-json-acceptance-", async (root) => {
+			writeProjectChain(root, "verified-flow.chain.json", JSON.stringify({
+				name: "verified-flow",
+				description: "Verified flow",
+				chain: [
+					{
+						agent: "worker",
+						task: "Implement fix",
+						acceptance: {
+							level: "verified",
+							verify: [{ id: "tests", command: "npm test" }],
+						},
+					},
+				],
+			}));
+
+			const { params } = await captureSlashCommandParams("run-chain", "verified-flow -- Audit", root);
+			assert.deepEqual((params as { chain?: Array<{ acceptance?: unknown }> }).chain?.[0]?.acceptance, {
+				level: "verified",
+				verify: [{ id: "tests", command: "npm test" }],
+			});
 		});
 	});
 
@@ -1019,7 +1050,7 @@ describe("subagent profiles slash commands", { skip: !available ? "slash-command
 			const profilesDir = path.join(process.env.HOME!, ".pi", "agent", "profiles", "pi-subagents");
 			fs.mkdirSync(profilesDir, { recursive: true });
 			fs.writeFileSync(path.join(profilesDir, "openai-codex.quota.json"), JSON.stringify({
-				subagents: { agentOverrides: { worker: { model: "openai-codex/gpt-5.4" } } },
+				subagents: { agentOverrides: { worker: { model: "gpt-5.4:high" } } },
 			}, null, 2));
 			const sent: unknown[] = [];
 			const commands = new Map<string, RegisteredSlashCommand>();

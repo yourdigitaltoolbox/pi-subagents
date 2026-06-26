@@ -202,11 +202,12 @@ describe("subagent prompt runtime", () => {
 		const user = { role: "user", content: "Task" };
 		const instruction = { role: "custom", customType: "subagent-orchestration-instructions", content: "Subagent orchestration is enabled." };
 		const slashResult = { role: "custom", customType: "subagent-slash-result", content: "## Orchestration" };
+		const slashTextResult = { role: "custom", customType: "subagent-slash-text-result", content: "Subagent profiles" };
 		const notify = { role: "custom", customType: "subagent-notify", content: "Background task completed" };
 		const control = { role: "custom", customType: "subagent_control_notice", content: "needs attention" };
 		const otherCustom = { role: "custom", customType: "other", content: "keep" };
 
-		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, notify, control, otherCustom]), [user, otherCustom]);
+		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, slashTextResult, notify, control, otherCustom]), [user, otherCustom]);
 	});
 
 	it("strips prior parent subagent tool calls and results from forked child context", () => {

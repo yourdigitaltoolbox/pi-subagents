@@ -81,14 +81,14 @@ describe("parseSingleTaskToken", () => {
 
 	it("parses extended metadata in inline config", () => {
 		const parsed = parseSingleTaskToken(
-			'reviewer[as=rev,label=Review,phase=p1,cwd=sub,count=3,acceptance=verified] "task"',
+			'reviewer[as=rev,label=Review,phase=p1,cwd=sub,count=3,acceptance=checked] "task"',
 		);
 		assert.equal(parsed.config.as, "rev");
 		assert.equal(parsed.config.label, "Review");
 		assert.equal(parsed.config.phase, "p1");
 		assert.equal(parsed.config.cwd, "sub");
 		assert.equal(parsed.config.count, 3);
-		assert.equal(parsed.config.acceptance, "verified");
+		assert.equal(parsed.config.acceptance, "checked");
 		assert.equal(parsed.task, "task");
 	});
 
@@ -362,6 +362,18 @@ describe("buildChainExpressionSteps", () => {
 		assert.equal(built, null);
 		assert.equal(notifications.length, 1);
 		assert.match(notifications[0] ?? "", /acceptance/i);
+	});
+
+	it("rejects inline acceptance levels that require object contracts", () => {
+		const notifications: string[] = [];
+		const built = buildChainExpressionSteps(
+			makeState(tempRoot) as never,
+			'scout[acceptance=verified] "scan" -> reviewer "review"',
+			makeCtx(notifications) as never,
+		);
+		assert.equal(built, null);
+		assert.equal(notifications.length, 1);
+		assert.match(notifications[0] ?? "", /supports auto, attested, or checked/);
 	});
 
 	it("loads an inline outputSchema path and rejects a missing one", () => {

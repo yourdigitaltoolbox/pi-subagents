@@ -362,10 +362,9 @@ Use the profile workflow like this:
 /subagents-refresh-provider-models openai-codex
 /subagents-generate-profiles openai-codex
 /subagents-load-profile openai-codex.quota
-/reload
 ```
 
-`/subagents-refresh-provider-models` writes a serialized provider model catalog with observed registry data, simple role-oriented classification, and live probe results from tiny one-shot `pi -p --model ...` checks. The cache refreshes when missing or stale; use `--force` to ignore freshness and probe again immediately.
+`/subagents-refresh-provider-models` writes a serialized provider model catalog with observed registry data, simple role-oriented classification, and live probe results from tiny one-shot `pi -p --model ... --no-tools` checks. The cache refreshes when missing or stale; use `--force` to ignore freshness and probe again immediately.
 
 `/subagents-generate-profiles` uses the provider catalog to produce quota and quality profiles. `/subagents-check-profile` re-checks each assigned model in a saved profile against the current registry and a live probe so you can detect model removals, auth problems, or stale assignments.
 
@@ -431,7 +430,7 @@ For a shared task, list agents and place one `--` before the task:
 
 ### Inline per-step config
 
-Append `[key=value,...]` to an agent name to override defaults for that step:
+Append `[key=value,...]` to an agent name to override defaults. `/chain` applies every key below; `/run` and `/parallel` use the execution-behavior keys (`output`, `outputMode`, `reads`, `model`, `skills`, `progress`) and ignore chain-only metadata such as `as`, `label`, `phase`, `count`, `outputSchema`, and `acceptance`.
 
 ```text
 /chain scout[output=context.md] "scan code" -> planner[reads=context.md] "analyze auth"
@@ -452,8 +451,8 @@ Append `[key=value,...]` to an agent name to override defaults for that step:
 | `phase` | `phase=analysis` | Group steps into a named phase. |
 | `cwd` | `cwd=packages/api` | Run the step in a subdirectory. |
 | `count` | `count=3` | Fan a group task into N copies (only inside a `( ... )` group). |
-| `outputSchema` | `outputSchema=schema.json` | Validate structured output against a JSON Schema file (path resolved against cwd). |
-| `acceptance` | `acceptance=verified` | Acceptance level: `none`, `attested`, `checked`, `verified`, or `reviewed`. |
+| `outputSchema` | `outputSchema=schema.json` | Validate structured output against a JSON Schema file (path resolved against the session cwd, not an inline step `cwd`). |
+| `acceptance` | `acceptance=checked` | Inline acceptance level: `auto`, `attested`, or `checked`. Use the tool API or saved `.chain.json` for object contracts such as `none`, `verified`, or `reviewed`. |
 
 Set `output=false`, `reads=false`, or `skills=false` to disable that behavior explicitly. Do not use `output=false` for file-only returns; use `outputMode=file-only` with an `output` path.
 

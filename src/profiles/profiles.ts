@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_AGENT_NAMES } from "../agents/agents.ts";
-import { getSupportedThinkingLevels, toModelInfo } from "../shared/model-info.ts";
+import { findModelInfo, getSupportedThinkingLevels, splitKnownThinkingSuffix, toModelInfo } from "../shared/model-info.ts";
 import { getAgentDir } from "../shared/utils.ts";
 
 export const DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS = 7;
@@ -93,6 +94,27 @@ function readJsonObjectFile(filePath: string): Record<string, unknown> {
 function writeJsonFile(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+}
+
+const SAFE_PATH_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function normalizePathToken(value: string, label: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`${label} is required.`);
+	if (!SAFE_PATH_TOKEN.test(trimmed) || trimmed === "." || trimmed === ".." || trimmed.includes("/") || trimmed.includes("\\")) {
+		throw new Error(`${label} must be a safe file name using only letters, numbers, dots, underscores, and hyphens.`);
+	}
+	return trimmed;
+}
+
+function normalizeProfileName(name: string): string {
+	const trimmed = name.trim();
+	const stem = trimmed.endsWith(".json") ? trimmed.slice(0, -5) : trimmed;
+	return normalizePathToken(stem, "Profile name");
+}
+
+function normalizeProviderName(provider: string): string {
+	return normalizePathToken(provider, "Provider");
 }
 
 function validateSubagentProfile(filePath: string, parsed: Record<string, unknown>): SubagentProfileFile {
@@ -301,8 +323,8 @@ async function probeModel(
 	if (typeof pi.exec !== "function") {
 		return { status: "skipped", message: "pi.exec is unavailable in this runtime." };
 	}
-	const result = await pi.exec("pi", ["-p", "--model", fullId, "--tools", "read", 'Reply with exactly "OK".'], {
-		cwd: ctx.cwd,
+	const result = await pi.exec("pi", ["-p", "--model", fullId, "--no-tools", 'Reply with exactly "OK".'], {
+		cwd: os.tmpdir(),
 		timeout: 45_000,
 	} as Record<string, unknown>);
 	const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
@@ -396,10 +418,7 @@ export function countHeuristicFallbackModels(catalog: ProviderModelCatalogFile):
 
 function resolveProfilePath(name: string): string {
 	const dir = ensureSubagentProfilesDir();
-	const trimmed = name.trim();
-	if (!trimmed) throw new Error("Profile name is required.");
-	const base = trimmed.endsWith(".json") ? trimmed : `${trimmed}.json`;
-	return path.join(dir, base);
+	return path.join(dir, `${normalizeProfileName(name)}.json`);
 }
 
 export function getSubagentProfilesRootDir(): string {
@@ -427,7 +446,7 @@ export function ensureProviderModelsDir(): string {
 }
 
 export function getProviderModelsPath(provider: string): string {
-	return path.join(ensureProviderModelsDir(), `${provider}.models.json`);
+	return path.join(ensureProviderModelsDir(), `${normalizeProviderName(provider)}.models.json`);
 }
 
 export function listSubagentProfiles(): string[] {
@@ -473,20 +492,19 @@ export async function refreshProviderModelCatalog(
 	provider: string,
 	options: { force?: boolean; maxAgeDays?: number; probe?: boolean } = {},
 ): Promise<{ filePath: string; catalog: ProviderModelCatalogFile; reused: boolean; heuristicFallbackCount: number }> {
-	const trimmedProvider = provider.trim();
-	if (!trimmedProvider) throw new Error("Provider is required.");
+	const normalizedProvider = normalizeProviderName(provider);
 	const maxAgeDays = options.maxAgeDays ?? DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS;
-	const filePath = getProviderModelsPath(trimmedProvider);
+	const filePath = getProviderModelsPath(normalizedProvider);
 	if (!options.force) {
-		const existing = readProviderModelCatalog(trimmedProvider);
+		const existing = readProviderModelCatalog(normalizedProvider);
 		if (existing && !isProviderModelCatalogStale(existing, maxAgeDays)) {
 			return { filePath, catalog: existing, reused: true, heuristicFallbackCount: countHeuristicFallbackModels(existing) };
 		}
 	}
 
-	const availableModels = ctx.modelRegistry.getAvailable().filter((model) => model.provider === trimmedProvider);
+	const availableModels = ctx.modelRegistry.getAvailable().filter((model) => model.provider === normalizedProvider);
 	if (availableModels.length === 0) {
-		throw new Error(`No models found in the current registry for provider '${trimmedProvider}'.`);
+		throw new Error(`No models found in the current registry for provider '${normalizedProvider}'.`);
 	}
 
 	const observedModels = [] as Array<{
@@ -548,7 +566,7 @@ export async function refreshProviderModelCatalog(
 	}
 	models.sort((a, b) => a.derived.profileRank - b.derived.profileRank || a.fullId.localeCompare(b.fullId));
 	const catalog: ProviderModelCatalogFile = {
-		provider: trimmedProvider,
+		provider: normalizedProvider,
 		refreshedAt: new Date().toISOString(),
 		maxAgeDays,
 		sources: ["runtime-registry", ...(options.probe === false ? [] : ["live-probe"]), "heuristic-classifier"],
@@ -564,7 +582,8 @@ export async function generateProfilesForProvider(
 	provider: string,
 	options: { maxAgeDays?: number; forceRefresh?: boolean; probe?: boolean } = {},
 ): Promise<{ quotaPath: string; qualityPath: string; catalogPath: string; quotaModels: { cheap: string; medium: string; strong: string }; qualityModels: { cheap: string; medium: string; strong: string }; heuristicFallbackCount: number; selectedHeuristicFallbackCount: number }> {
-	const { filePath: catalogPath, catalog, heuristicFallbackCount } = await refreshProviderModelCatalog(pi, ctx, provider, {
+	const normalizedProvider = normalizeProviderName(provider);
+	const { filePath: catalogPath, catalog, heuristicFallbackCount } = await refreshProviderModelCatalog(pi, ctx, normalizedProvider, {
 		maxAgeDays: options.maxAgeDays,
 		force: options.forceRefresh,
 		probe: options.probe,
@@ -572,13 +591,13 @@ export async function generateProfilesForProvider(
 	const usableModels = catalog.models.filter(catalogModelIsUsable);
 	const profileModels = filterDominatedModels(usableModels);
 	if (profileModels.length === 0) {
-		throw new Error(`Provider '${provider}' has no usable models after filtering.`);
+		throw new Error(`Provider '${normalizedProvider}' has no usable models after filtering.`);
 	}
 	const quotaModels = pickTierModels(profileModels, "quota");
 	const qualityModels = pickTierModels(profileModels, "quality");
 	const dir = ensureSubagentProfilesDir();
-	const quotaPath = path.join(dir, `${provider}.quota.json`);
-	const qualityPath = path.join(dir, `${provider}.quality.json`);
+	const quotaPath = path.join(dir, `${normalizedProvider}.quota.json`);
+	const qualityPath = path.join(dir, `${normalizedProvider}.quality.json`);
 	writeJsonFile(quotaPath, buildProfileFile("quota", quotaModels));
 	writeJsonFile(qualityPath, buildProfileFile("quality", qualityModels));
 	const selectedModels = new Set([...Object.values(quotaModels), ...Object.values(qualityModels)]);
@@ -592,22 +611,25 @@ export async function checkSubagentProfile(
 	name: string,
 ): Promise<ProfileCheckResult> {
 	const { filePath, profile } = readSubagentProfile(name);
-	const available = new Set(ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`));
+	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const entries = Object.entries(profile.subagents.agentOverrides)
 		.filter(([, value]) => typeof value?.model === "string" && value.model.trim())
 		.map(([agent, value]) => ({ agent, model: value.model!.trim() }));
 	const probeCache = new Map<string, { status: ProbeStatus; message?: string }>();
 	const results: ProfileCheckResult["results"] = [];
 	for (const entry of entries) {
-		let probe = probeCache.get(entry.model);
+		const modelInfo = findModelInfo(entry.model, availableModels);
+		const { thinkingSuffix } = splitKnownThinkingSuffix(entry.model);
+		const probeModelId = modelInfo ? `${modelInfo.fullId}${thinkingSuffix}` : entry.model;
+		let probe = probeCache.get(probeModelId);
 		if (!probe) {
-			probe = await probeModel(pi, ctx, entry.model);
-			probeCache.set(entry.model, probe);
+			probe = await probeModel(pi, ctx, probeModelId);
+			probeCache.set(probeModelId, probe);
 		}
 		results.push({
 			agent: entry.agent,
 			model: entry.model,
-			inRegistry: available.has(entry.model),
+			inRegistry: modelInfo !== undefined,
 			probe,
 		});
 	}

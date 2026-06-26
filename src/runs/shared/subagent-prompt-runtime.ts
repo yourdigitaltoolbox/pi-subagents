@@ -35,6 +35,7 @@ export const CHILD_FANOUT_BOUNDARY_INSTRUCTIONS = [
 const PARENT_ONLY_CUSTOM_MESSAGE_TYPES = new Set([
 	"subagent-orchestration-instructions",
 	"subagent-slash-result",
+	"subagent-slash-text-result",
 	"subagent-notify",
 	"subagent_control_notice",
 	"subagent-control",
