@@ -565,7 +565,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			assert.equal(result.isError, undefined);
 			assert.match(result.content[0]?.text ?? "", /Revived async subagent from/);
 			assert.match(result.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-			assert.match(result.content[0]?.text ?? "", /end your turn now/);
+			assert.match(result.content[0]?.text ?? "", /call wait\(\)/);
 			assert.match(result.content[0]?.text ?? "", /Status if needed: subagent\(\{ action: "status"/);
 			assert.doesNotMatch(result.content[0]?.text ?? "", /Follow:/);
 			const revivedId = result.details?.asyncId;

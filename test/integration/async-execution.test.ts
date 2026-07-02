@@ -535,7 +535,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 		assert.match(singleResult.content[0]?.text ?? "", /Async: worker \[/);
 		assert.match(singleResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(singleResult.content[0]?.text ?? "", /end your turn now/);
+		assert.match(singleResult.content[0]?.text ?? "", /call wait\(\)/);
+		assert.match(singleResult.content[0]?.text ?? "", /there is no next turn, so use wait\(\)/);
 		await waitForAsyncResultFile(singleId, 10_000);
 
 		mockPi.onCall({ output: "parallel one done" });
@@ -549,7 +550,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 		assert.match(parallelResult.content[0]?.text ?? "", /Async parallel:/);
 		assert.match(parallelResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(parallelResult.content[0]?.text ?? "", /Pi will deliver the completion/);
+		assert.match(parallelResult.content[0]?.text ?? "", /call wait\(\)/);
 		const parallelResultPath = await waitForAsyncResultFile(parallelId, 10_000);
 		const parallelPayload = JSON.parse(fs.readFileSync(parallelResultPath, "utf-8")) as { agent?: string; mode?: string };
 		assert.equal(parallelPayload.mode, "parallel");
