@@ -550,17 +550,19 @@ contact_supervisor({
 })
 ```
 
-The parent replies with:
+The parent replies with the native supervisor tool:
 
 ```typescript
-intercom({ action: "reply", message: "Optimize for readability." })
+subagent_supervisor({ action: "reply", message: "Optimize for readability." })
 ```
 
 Or inspects unresolved asks first:
 
 ```typescript
-intercom({ action: "pending" })
+subagent_supervisor({ action: "pending" })
 ```
+
+If no external `pi-intercom` tool owns the `intercom` name, native supervisor coordination may also expose `intercom` as a compatibility fallback. Prefer `subagent_supervisor` for parent replies because it never overrides installed `pi-intercom`.
 
 If intercom messages do not show up, run `subagent({ action: "doctor" })` or `/subagents-doctor`.
 

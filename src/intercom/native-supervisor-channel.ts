@@ -18,6 +18,7 @@ import { writeAtomicJson } from "../shared/atomic-json.ts";
 const SUPERVISOR_CHANNEL_ROOT = path.join(TEMP_ROOT_DIR, "supervisor-channels");
 const REQUESTS_DIR = "requests";
 const REPLIES_DIR = "replies";
+export const NATIVE_SUPERVISOR_TOOL_NAME = "subagent_supervisor";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
@@ -275,8 +276,9 @@ function hasTool(pi: ExtensionAPI, name: string): boolean {
 	}
 }
 
-export function registerNativeSupervisorClient(pi: ExtensionAPI): void {
+export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { includeIntercomFallback?: boolean } = {}): void {
 	if (!readChildMetadata()) return;
+	const includeIntercomFallback = options.includeIntercomFallback !== false;
 	if (!hasTool(pi, "contact_supervisor")) {
 		const tool: ToolDefinition<typeof ContactSupervisorParamsSchema, Record<string, unknown>> = {
 			name: "contact_supervisor",
@@ -289,7 +291,7 @@ export function registerNativeSupervisorClient(pi: ExtensionAPI): void {
 		};
 		pi.registerTool(tool);
 	}
-	if (!hasTool(pi, "intercom")) {
+	if (includeIntercomFallback && !hasTool(pi, "intercom")) {
 		const tool: ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> = {
 			name: "intercom",
 			label: "Intercom",
@@ -349,12 +351,13 @@ function listRequestFiles(): Array<{ channelDir: string; file: string }> {
 }
 
 function currentContextSessionId(state: Pick<SubagentState, "currentSessionId">, ctx: ExtensionContext): string | undefined {
-	if (state.currentSessionId) return state.currentSessionId;
 	try {
-		return ctx.sessionManager.getSessionId();
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (sessionId) return sessionId;
 	} catch {
-		return undefined;
+		// Fall through to the last known identity.
 	}
+	return state.currentSessionId ?? undefined;
 }
 
 function requestMatchesContext(request: SupervisorRequest, state: Pick<SubagentState, "currentSessionId">, ctx: ExtensionContext): boolean {
@@ -363,14 +366,14 @@ function requestMatchesContext(request: SupervisorRequest, state: Pick<SubagentS
 }
 
 function formatPendingLine(request: PendingSupervisorRequest): string {
-	const replyHint = request.expectsReply ? ` Reply: intercom({ action: "reply", replyTo: "${request.id}", message: "..." })` : "";
+	const replyHint = request.expectsReply ? ` Reply: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })` : "";
 	return `- ${request.id}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}.${replyHint}`;
 }
 
 function requestVisibleText(request: PendingSupervisorRequest): string {
 	const lines = [request.message];
 	if (request.expectsReply) {
-		lines.push("", `Reply with: intercom({ action: "reply", replyTo: "${request.id}", message: "..." })`);
+		lines.push("", `Reply with: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })`);
 	}
 	return lines.join("\n");
 }
@@ -424,11 +427,13 @@ function publicPendingRequests(pending: Map<string, PendingSupervisorRequest>): 
 	}));
 }
 
-function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>): ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> {
+function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>, name = "intercom"): ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> {
 	return {
-		name: "intercom",
-		label: "Intercom",
-		description: "Native pi-subagents supervisor channel. Use reply/pending/status to answer child subagent requests.",
+		name,
+		label: name === "intercom" ? "Intercom" : "Subagent Supervisor",
+		description: name === "intercom"
+			? "Native pi-subagents supervisor channel. Use reply/pending/status to answer child subagent requests."
+			: "Native pi-subagents supervisor channel. Use reply/pending/status to answer child subagent requests without overriding pi-intercom.",
 		parameters: IntercomParamsSchema,
 		async execute(_id, params) {
 			const input = params as IntercomParams;
@@ -458,7 +463,10 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 	const seenFiles = new Set<string>();
 	let poller: ReturnType<typeof setInterval> | undefined;
 
-	if (!hasTool(pi, "intercom")) pi.registerTool(buildParentIntercomTool(pending));
+	const registerParentTools = (): void => {
+		if (!hasTool(pi, NATIVE_SUPERVISOR_TOOL_NAME)) pi.registerTool(buildParentIntercomTool(pending, NATIVE_SUPERVISOR_TOOL_NAME));
+		if (!hasTool(pi, "intercom")) pi.registerTool(buildParentIntercomTool(pending));
+	};
 
 	const poll = (): void => {
 		const ctx = state.lastUiContext;
@@ -495,6 +503,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 	return {
 		start: () => {
 			if (poller) return;
+			registerParentTools();
 			poll();
 			poller = setInterval(poll, CHANNEL_POLL_MS);
 			poller.unref?.();

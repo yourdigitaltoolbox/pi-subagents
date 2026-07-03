@@ -261,7 +261,21 @@ function registerSteeringInbox(pi: ExtensionAPI): void {
 export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 	registerSteeringInbox(pi);
 	registerToolBudget(pi, decodeToolBudgetEnv(process.env[TOOL_BUDGET_ENV]));
-	registerNativeSupervisorClient(pi);
+	let nativeSupervisorClientRegistered = false;
+	let nativeSupervisorFallbackRegistered = false;
+	const registerNativeSupervisorClientOnce = (): void => {
+		if (nativeSupervisorClientRegistered) return;
+		nativeSupervisorClientRegistered = true;
+		registerNativeSupervisorClient(pi, { includeIntercomFallback: false });
+	};
+	const registerNativeSupervisorFallbackOnce = (): void => {
+		registerNativeSupervisorClientOnce();
+		if (nativeSupervisorFallbackRegistered) return;
+		nativeSupervisorFallbackRegistered = true;
+		registerNativeSupervisorClient(pi);
+	};
+	const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event: unknown) => unknown) => void;
+	onRuntimeEvent("session_start", registerNativeSupervisorClientOnce);
 	const structuredOutputPath = process.env[STRUCTURED_OUTPUT_CAPTURE_ENV];
 	const structuredSchemaPath = process.env[STRUCTURED_OUTPUT_SCHEMA_ENV];
 	if (structuredOutputPath && structuredSchemaPath) {
@@ -300,7 +314,6 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		});
 	}
 
-	const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event: unknown) => unknown) => void;
 	onRuntimeEvent("context", (event: { messages: unknown[] }) => {
 		const messages = stripParentOnlySubagentMessages(event.messages);
 		if (messages === event.messages) return undefined;
@@ -308,6 +321,7 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 	});
 
 	onRuntimeEvent("before_agent_start", async (event: { systemPrompt: string }) => {
+		registerNativeSupervisorFallbackOnce();
 		const intercomSessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
 		if (intercomSessionName && typeof pi.setSessionName === "function") {
 			pi.setSessionName(intercomSessionName);

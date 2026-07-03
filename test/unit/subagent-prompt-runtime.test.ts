@@ -4,7 +4,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { writeSteerRequestToDir } from "../../src/runs/background/control-channel.ts";
-import { SUBAGENT_FANOUT_CHILD_ENV, SUBAGENT_STEER_INBOX_ENV } from "../../src/runs/shared/pi-args.ts";
+import {
+	SUBAGENT_CHILD_AGENT_ENV,
+	SUBAGENT_CHILD_INDEX_ENV,
+	SUBAGENT_FANOUT_CHILD_ENV,
+	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
+	SUBAGENT_ORCHESTRATOR_TARGET_ENV,
+	SUBAGENT_RUN_ID_ENV,
+	SUBAGENT_STEER_INBOX_ENV,
+	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
+} from "../../src/runs/shared/pi-args.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "../../src/runs/shared/structured-output.ts";
 import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
 import registerSubagentPromptRuntime, {
@@ -27,6 +36,12 @@ const envSnapshot = {
 	PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE,
 	PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA,
 	PI_SUBAGENT_TOOL_BUDGET: process.env.PI_SUBAGENT_TOOL_BUDGET,
+	PI_SUBAGENT_ORCHESTRATOR_TARGET: process.env.PI_SUBAGENT_ORCHESTRATOR_TARGET,
+	PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID,
+	PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR: process.env.PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR,
+	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
+	PI_SUBAGENT_CHILD_AGENT: process.env.PI_SUBAGENT_CHILD_AGENT,
+	PI_SUBAGENT_CHILD_INDEX: process.env.PI_SUBAGENT_CHILD_INDEX,
 };
 
 const SKILLS_SECTION = "\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>safe-bash</name>\n    <description>desc</description>\n    <location>/tmp/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>pi-subagents</name>\n    <description>delegate to subagents</description>\n    <location>/tmp/pi-subagents/SKILL.md</location>\n  </skill>\n</available_skills>";
@@ -65,7 +80,28 @@ afterEach(() => {
 	else process.env[STRUCTURED_OUTPUT_SCHEMA_ENV] = envSnapshot.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA;
 	if (envSnapshot.PI_SUBAGENT_TOOL_BUDGET === undefined) delete process.env[TOOL_BUDGET_ENV];
 	else process.env[TOOL_BUDGET_ENV] = envSnapshot.PI_SUBAGENT_TOOL_BUDGET;
+	if (envSnapshot.PI_SUBAGENT_ORCHESTRATOR_TARGET === undefined) delete process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV];
+	else process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = envSnapshot.PI_SUBAGENT_ORCHESTRATOR_TARGET;
+	if (envSnapshot.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID === undefined) delete process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV];
+	else process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = envSnapshot.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
+	if (envSnapshot.PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR === undefined) delete process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV];
+	else process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] = envSnapshot.PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR;
+	if (envSnapshot.PI_SUBAGENT_RUN_ID === undefined) delete process.env[SUBAGENT_RUN_ID_ENV];
+	else process.env[SUBAGENT_RUN_ID_ENV] = envSnapshot.PI_SUBAGENT_RUN_ID;
+	if (envSnapshot.PI_SUBAGENT_CHILD_AGENT === undefined) delete process.env[SUBAGENT_CHILD_AGENT_ENV];
+	else process.env[SUBAGENT_CHILD_AGENT_ENV] = envSnapshot.PI_SUBAGENT_CHILD_AGENT;
+	if (envSnapshot.PI_SUBAGENT_CHILD_INDEX === undefined) delete process.env[SUBAGENT_CHILD_INDEX_ENV];
+	else process.env[SUBAGENT_CHILD_INDEX_ENV] = envSnapshot.PI_SUBAGENT_CHILD_INDEX;
 });
+
+function setSupervisorEnv(): void {
+	process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "subagent-chat-parent";
+	process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";
+	process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] = path.join(os.tmpdir(), "subagent-supervisor-runtime-test");
+	process.env[SUBAGENT_RUN_ID_ENV] = "run-123";
+	process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+	process.env[SUBAGENT_CHILD_INDEX_ENV] = "0";
+}
 
 describe("subagent prompt runtime", () => {
 	it("nudges after the tool budget soft limit and blocks configured tools after hard", () => {
@@ -320,6 +356,70 @@ describe("subagent prompt runtime", () => {
 		process.env[SUBAGENT_FANOUT_CHILD_ENV] = "1";
 
 		assert.deepEqual(stripParentOnlySubagentMessages([user, subagentCall, subagentResult, instruction]), [user, subagentCall, subagentResult]);
+	});
+
+	it("defers native supervisor registration until runtime events and respects installed pi-intercom tools", async () => {
+		setSupervisorEnv();
+		const handlers = new Map<string, (payload?: unknown) => unknown>();
+		const registered: string[] = [];
+
+		registerSubagentPromptRuntime({
+			on(event: string, handler: (payload?: unknown) => unknown) {
+				handlers.set(event, handler);
+			},
+			getAllTools: () => [{ name: "intercom" }, { name: "contact_supervisor" }],
+			registerTool(tool: { name: string }) {
+				registered.push(tool.name);
+			},
+		} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
+
+		assert.deepEqual(registered, []);
+		handlers.get("session_start")?.({});
+		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
+		assert.deepEqual(registered, []);
+	});
+
+	it("keeps installed pi-intercom while filling only a missing child contact_supervisor tool", async () => {
+		setSupervisorEnv();
+		const handlers = new Map<string, (payload?: unknown) => unknown>();
+		const registered: string[] = [];
+
+		registerSubagentPromptRuntime({
+			on(event: string, handler: (payload?: unknown) => unknown) {
+				handlers.set(event, handler);
+			},
+			getAllTools: () => [{ name: "intercom" }, ...registered.map((name) => ({ name }))],
+			registerTool(tool: { name: string }) {
+				registered.push(tool.name);
+			},
+		} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
+
+		handlers.get("session_start")?.({});
+		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
+
+		assert.deepEqual(registered, ["contact_supervisor"]);
+	});
+
+	it("registers native supervisor tools at runtime when pi-intercom is absent", async () => {
+		setSupervisorEnv();
+		const handlers = new Map<string, (payload?: unknown) => unknown>();
+		const registered: string[] = [];
+
+		registerSubagentPromptRuntime({
+			on(event: string, handler: (payload?: unknown) => unknown) {
+				handlers.set(event, handler);
+			},
+			getAllTools: () => registered.map((name) => ({ name })),
+			registerTool(tool: { name: string }) {
+				registered.push(tool.name);
+			},
+		} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
+
+		handlers.get("session_start")?.({});
+		assert.deepEqual(registered, ["contact_supervisor"]);
+
+		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
+		assert.deepEqual(registered, ["contact_supervisor", "intercom"]);
 	});
 
 	it("sets the child intercom session name from env during agent startup", async () => {
