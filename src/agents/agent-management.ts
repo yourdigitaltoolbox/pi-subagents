@@ -21,6 +21,7 @@ import {
 	removeBuiltinAgentOverrideFields,
 } from "./agents.ts";
 import { serializeAgent } from "./agent-serializer.ts";
+import { mergeAgentsForScope } from "./agent-selection.ts";
 import { serializeChain, serializeJsonChain } from "./chain-serializer.ts";
 import { discoverAvailableSkills } from "./skills.ts";
 import {
@@ -580,7 +581,8 @@ function formatChainDetail(chain: ChainConfig): string {
 export function handleList(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	const scope = normalizeListScope(params.agentScope) ?? "both";
 	const d = discoverAgentsAll(ctx.cwd);
-	const scopedAgents = allAgents(d).filter((a) => scope === "both" || a.source === "builtin" || a.source === "package" || a.source === scope).sort((a, b) => a.name.localeCompare(b.name));
+	const scopedAgents = mergeAgentsForScope(scope, d.user, d.project, d.builtin, d.package)
+		.sort((a, b) => a.name.localeCompare(b.name));
 	const agents = scopedAgents.filter((a) => !a.disabled);
 	const chains = d.chains.filter((c) => scope === "both" || c.source === "package" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
 	const diagnostics = d.chainDiagnostics.filter((entry) => scope === "both" || entry.source === scope);
