@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 import {
+	NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME,
 	NATIVE_SUPERVISOR_TOOL_NAME,
 	createNativeSupervisorChannel,
 	ensureSupervisorChannelDir,
@@ -402,6 +403,125 @@ describe("native supervisor channel", () => {
 		} finally {
 			channel.dispose();
 		}
+	});
+
+	it("queues a typed advisory relay-exposure request without authority material and detaches for parent action", async () => {
+		const runId = `run-${randomUUID()}`;
+		const channelDir = resolveSupervisorChannelDir(runId, "worker", 3);
+		createdChannels.push(channelDir);
+		process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "shared-name";
+		process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";
+		process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] = channelDir;
+		process.env[SUBAGENT_RUN_ID_ENV] = runId;
+		process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+		process.env[SUBAGENT_CHILD_INDEX_ENV] = "3";
+		const registeredTools = new Map<string, { execute: (_id: string, params: Record<string, unknown>) => Promise<unknown> | unknown }>();
+		const childPi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: Record<string, unknown>) => Promise<unknown> | unknown }) => {
+				registeredTools.set(tool.name, tool);
+			},
+		};
+		registerNativeSupervisorClient(childPi as never, { includeIntercomFallback: false });
+		assert.equal(registeredTools.has(NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME), true);
+		await registeredTools.get(NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME)!.execute("exposure", { mode: "relay", ttlMs: 30_000 });
+
+		const files = fs.readdirSync(path.join(channelDir, "requests"));
+		assert.equal(files.length, 1);
+		const request = JSON.parse(fs.readFileSync(path.join(channelDir, "requests", files[0]!), "utf-8")) as Record<string, unknown>;
+		assert.deepEqual({
+			type: request.type,
+			reason: request.reason,
+			expectsReply: request.expectsReply,
+			runId: request.runId,
+			agent: request.agent,
+			childIndex: request.childIndex,
+			requestedExposure: request.requestedExposure,
+			ttlMs: request.ttlMs,
+		}, {
+			type: "subagent.supervisor.request",
+			reason: "relay_exposure",
+			expectsReply: false,
+			runId,
+			agent: "worker",
+			childIndex: 3,
+			requestedExposure: "relay",
+			ttlMs: 30_000,
+		});
+		assert.equal(/capability|nonce|token|lease|workload/i.test(JSON.stringify(request)), false);
+
+		const sent: Array<{ content?: string; details?: Record<string, unknown> }> = [];
+		const emitted: string[] = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => "session-parent", getSessionFile: () => null, getEntries: () => [] },
+		};
+		const parentPi = {
+			getAllTools: () => [],
+			registerTool: () => {},
+			sendMessage: (message: { content?: string; details?: Record<string, unknown> }) => { sent.push(message); },
+			events: { emit: (channel: string) => { emitted.push(channel); } },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(parentPi as never, makeState("session-parent", ctx));
+		channel.start();
+		channel.dispose();
+		assert.equal(sent.length, 1);
+		assert.match(sent[0]?.content ?? "", /action: "exposure"|relay exposure/i);
+		assert.deepEqual(emitted, [INTERCOM_DETACH_REQUEST_EVENT], "the wrapper must detach so the parent can perform the separate exposure action");
+		assert.deepEqual(fs.readdirSync(path.join(channelDir, "requests")), []);
+	});
+
+	it("rejects authority-looking or schema-drifted relay exposure request files", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const authorityFields = [
+			{ capability: `rpel1.${randomUUID()}.${"a".repeat(43)}` },
+			{ nonce: randomUUID() },
+			{ delegationToken: "delegation-secret" },
+			{ relayExposureLeaseId: randomUUID() },
+			{ workloadId: randomUUID() },
+			{ unexpected: true },
+		];
+		const sent: unknown[] = [];
+		const emitted: unknown[] = [];
+		for (const [index, extra] of authorityFields.entries()) {
+			const runId = `malformed-relay-${randomUUID()}`;
+			const channelDir = resolveSupervisorChannelDir(runId, "worker", index);
+			createdChannels.push(channelDir);
+			ensureSupervisorChannelDir(channelDir);
+			const requestId = randomUUID();
+			fs.writeFileSync(path.join(channelDir, "requests", `${requestId}.json`), JSON.stringify({
+				type: "subagent.supervisor.request",
+				id: requestId,
+				createdAt: Date.now(),
+				reason: "relay_exposure",
+				message: "untrusted advisory",
+				expectsReply: false,
+				orchestratorSessionId: currentSessionId,
+				runId,
+				agent: "worker",
+				childIndex: index,
+				requestedExposure: "relay",
+				...extra,
+			}), "utf-8");
+		}
+		const ctx = {
+			cwd: process.cwd(), hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [], registerTool: () => {}, getSessionName: () => "shared-name",
+			sendMessage: (message: unknown) => { sent.push(message); },
+			events: { emit: (channel: string, payload: unknown) => { emitted.push({ channel, payload }); } },
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+
+		channel.start();
+		channel.dispose();
+
+		assert.deepEqual(sent, []);
+		assert.deepEqual(emitted, []);
 	});
 
 	it("removes the request file when a child supervisor ask is cancelled", async () => {

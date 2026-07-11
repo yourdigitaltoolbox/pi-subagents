@@ -11,6 +11,17 @@ import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { applyThinkingSuffix } from "../shared/pi-args.ts";
+import {
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_RUNNER_DELEGATION_ENV,
+	RELAY_RUNNER_SOCKET_ENV,
+	delegateRelayRunner,
+	explicitExtensionSelectionLoadsRemotePi,
+	relayIntentMayNeedAuthority,
+	type RelayExposureEventBus,
+	type RelayRunnerDelegationResult,
+} from "../shared/relay-exposure.ts";
+import { createChildRuntimeIdentity, type ChildRuntimeIdentity } from "../shared/child-session-contract.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isDynamicParallelStep, isParallelStep, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
 import type { RunnerStep } from "../shared/parallel-utils.ts";
@@ -48,6 +59,7 @@ import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedPar
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
+import { createRelayRunnerClient } from "./relay-runner-client.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -112,6 +124,7 @@ interface AsyncExecutionContext {
 
 interface AsyncChainParams {
 	chain: ChainStep[];
+	workspaceId?: string;
 	task?: string;
 	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: Exclude<SubagentRunMode, "single">;
@@ -144,11 +157,15 @@ interface AsyncChainParams {
 	configToolBudget?: ResolvedToolBudget;
 	/** Global cap on simultaneously-running subagent tasks within the async run. */
 	globalConcurrencyLimit?: number;
+	/** Process-memory-only authority delivered through trusted runner env. */
+	runnerDelegation?: RelayRunnerDelegation;
 }
 
 interface AsyncSingleParams {
 	agent: string;
+	workspaceId?: string;
 	task?: string;
+	childIdentity?: ChildRuntimeIdentity;
 	agentConfig: AgentConfig;
 	ctx: AsyncExecutionContext;
 	cwd?: string;
@@ -178,6 +195,8 @@ interface AsyncSingleParams {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	/** Process-memory-only authority delivered through trusted runner env. */
+	runnerDelegation?: RelayRunnerDelegation;
 }
 
 interface AsyncExecutionResult {
@@ -188,6 +207,7 @@ interface AsyncExecutionResult {
 
 export interface AsyncRunnerStepBuildParams {
 	chain: ChainStep[];
+	workspaceId?: string;
 	task?: string;
 	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: SubagentRunMode;
@@ -268,6 +288,25 @@ export function resolveAsyncRunnerLogPaths(cfg: object): { stdoutPath: string; s
 	};
 }
 
+type RelayRunnerDelegation = Extract<RelayRunnerDelegationResult, { ok: true }>;
+
+export function buildAsyncRunnerEnv(
+	inherited: NodeJS.ProcessEnv,
+	delegation?: RelayRunnerDelegation,
+	packageRoot: string | undefined = piPackageRoot,
+): NodeJS.ProcessEnv {
+	return {
+		...inherited,
+		...(packageRoot ? { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: packageRoot } : {}),
+		// A foreground child capability never belongs to the detached runner.
+		[RELAY_EXPOSURE_CAPABILITY_ENV]: "",
+		// These two values are the only async runner authority and must never be
+		// serialized into cfg/status/result/artifact/transcript files.
+		[RELAY_RUNNER_DELEGATION_ENV]: delegation?.token ?? "",
+		[RELAY_RUNNER_SOCKET_ENV]: delegation?.socketPath ?? "",
+	};
+}
+
 function closeFd(fd: number | undefined): void {
 	if (fd === undefined) return;
 	try {
@@ -280,7 +319,12 @@ function closeFd(fd: number | undefined): void {
 /**
  * Spawn the async runner process
  */
-function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; error?: string } {
+function spawnRunner(
+	cfg: object,
+	suffix: string,
+	cwd: string,
+	delegation?: RelayRunnerDelegation,
+): { pid?: number; error?: string } {
 	if (!jitiCliPath) {
 		return { error: "upstream jiti for TypeScript execution could not be found; ensure package dependencies are installed" };
 	}
@@ -297,7 +341,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 	fs.mkdirSync(TEMP_ROOT_DIR, { recursive: true });
 	const cfgPath = getAsyncConfigPath(suffix);
 	fs.writeFileSync(cfgPath, JSON.stringify(cfg));
-	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
+	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner-entry.ts");
 	const nodeCommand = resolveAsyncRunnerNodeCommand();
 
 	const logPaths = resolveAsyncRunnerLogPaths(cfg);
@@ -314,10 +358,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 			detached: true,
 			stdio: ["ignore", stdoutFd ?? "ignore", stderrFd ?? "ignore"],
 			windowsHide: true,
-			env: {
-				...process.env,
-				...(piPackageRoot ? { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: piPackageRoot } : {}),
-			},
+			env: buildAsyncRunnerEnv(process.env, delegation),
 		});
 		closeFd(stdoutFd);
 		closeFd(stderrFd);
@@ -345,6 +386,9 @@ function formatAsyncStartError(mode: SubagentRunMode, message: string): AsyncExe
 }
 
 const UNAVAILABLE_SUBAGENT_SKILL_ERROR = "Skills not found: pi-subagents";
+const ASYNC_RELAY_RUNNER_MAX_DELEGATION_TTL_MS = 8 * 60_000;
+const ASYNC_RELAY_RUNNER_LEASE_TTL_MS = 60_000;
+const ASYNC_RELAY_RUNNER_MAX_CHILD_ISSUES = 128;
 
 class UnavailableSubagentSkillError extends Error {}
 class AsyncStartValidationError extends Error {}
@@ -418,7 +462,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.model ? { model: s.model } : {}),
 		};
 	};
-	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number) => {
+	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number, allocateIdentity = true) => {
 		const a = agents.find((x) => x.name === s.agent)!;
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
 		const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, s.toolBudget ? "toolBudget" : a.toolBudget ? "agent.toolBudget" : "config.toolBudget");
@@ -461,6 +505,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
 			agent: s.agent,
+			...(allocateIdentity ? { childIdentity: createChildRuntimeIdentity(params.workspaceId) } : {}),
 			task,
 			phase: s.phase,
 			label: s.label,
@@ -475,6 +520,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			tools: a.tools,
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
+			requestedExposure: a.exposure ?? "local",
+			requestedExposureSource: a.exposureIntentSource ?? (a.exposure !== undefined ? "agent" : "fallback"),
 			mcpDirectTools: a.mcpDirectTools,
 			completionGuard: a.completionGuard,
 			systemPrompt,
@@ -555,7 +602,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				const dynamicFlatSteps = Array.from({ length: maxItems }, () => nextFlatStep());
 				return {
 					expand: s.expand,
-					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior),
+					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined, false),
 					collect: s.collect,
 					concurrency: s.concurrency,
 					failFast: s.failFast,
@@ -597,6 +644,88 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		if (error instanceof UnavailableSubagentSkillError || error instanceof AsyncStartValidationError) return { error: error.message };
 		throw error;
 	}
+}
+
+async function requestAsyncRunnerDelegation(
+	id: string,
+	workspaceId: string | undefined,
+	ctx: AsyncExecutionContext,
+	timeoutMs: number | undefined,
+	intentSources: Array<"run" | "agent" | "fallback">,
+): Promise<RelayRunnerDelegation | undefined> {
+	if (!workspaceId) return undefined;
+	const events = ctx.pi.events as unknown as RelayExposureEventBus;
+	if (!events || typeof events.on !== "function" || typeof events.emit !== "function") return undefined;
+	const boundedRunTtl = timeoutMs === undefined
+		? ASYNC_RELAY_RUNNER_MAX_DELEGATION_TTL_MS
+		: Math.max(
+			ASYNC_RELAY_RUNNER_LEASE_TTL_MS,
+			Math.min(ASYNC_RELAY_RUNNER_MAX_DELEGATION_TTL_MS, timeoutMs + ASYNC_RELAY_RUNNER_LEASE_TTL_MS),
+		);
+	const result = await delegateRelayRunner(events, {
+		rootRunId: id,
+		workspaceId,
+		delegationTtlMs: boundedRunTtl,
+		maxLeaseTtlMs: ASYNC_RELAY_RUNNER_LEASE_TTL_MS,
+		maxChildIssues: ASYNC_RELAY_RUNNER_MAX_CHILD_ISSUES,
+		intentSources,
+		timeoutMs: 2_000,
+	});
+	return result.ok ? result : undefined;
+}
+
+async function releaseUnusedRunnerDelegation(delegation: RelayRunnerDelegation | undefined): Promise<void> {
+	if (!delegation) return;
+	try {
+		await createRelayRunnerClient({ token: delegation.token, socketPath: delegation.socketPath }).release();
+	} catch {
+		// Broker-memory expiry is the backstop; bearer material is never logged.
+	}
+}
+
+function agentNeedsAsyncRelay(agent: AgentConfig | undefined): boolean {
+	if (!agent) return false;
+	const source = agent.exposureIntentSource ?? (agent.exposure !== undefined ? "agent" : "fallback");
+	return relayIntentMayNeedAuthority(agent.exposure, source)
+		&& explicitExtensionSelectionLoadsRemotePi(agent.extensions);
+}
+
+function asyncRelayIntentSources(agents: Array<AgentConfig | undefined>): Array<"run" | "agent" | "fallback"> {
+	const sources = new Set<"run" | "agent" | "fallback">();
+	for (const agent of agents.filter(agentNeedsAsyncRelay)) {
+		sources.add(agent?.exposureIntentSource ?? (agent?.exposure !== undefined ? "agent" : "fallback"));
+	}
+	return (["run", "agent", "fallback"] as const).filter((source) => sources.has(source));
+}
+
+export async function executeAsyncChainWithRelay(
+	id: string,
+	params: AsyncChainParams,
+): Promise<AsyncExecutionResult> {
+	// Reserve one bounded runner token when any agent in this async run may need
+	// relay. Append requests arrive later through durable files and may select an
+	// agent not present in the initial chain; they must reuse this in-memory token
+	// rather than persisting or introducing authority after detach.
+	const intentSources = asyncRelayIntentSources(params.agents);
+	const runnerDelegation = intentSources.length > 0
+		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs, intentSources)
+		: undefined;
+	const result = executeAsyncChain(id, { ...params, runnerDelegation });
+	if (result.isError) await releaseUnusedRunnerDelegation(runnerDelegation);
+	return result;
+}
+
+export async function executeAsyncSingleWithRelay(
+	id: string,
+	params: AsyncSingleParams,
+): Promise<AsyncExecutionResult> {
+	const intentSources = asyncRelayIntentSources([params.agentConfig]);
+	const runnerDelegation = intentSources.length > 0
+		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs, intentSources)
+		: undefined;
+	const result = executeAsyncSingle(id, { ...params, runnerDelegation });
+	if (result.isError) await releaseUnusedRunnerDelegation(runnerDelegation);
+	return result;
 }
 
 /**
@@ -646,6 +775,7 @@ export function executeAsyncChain(
 
 	const built = buildAsyncRunnerSteps(id, {
 		chain,
+		workspaceId: params.workspaceId,
 		task: params.task,
 		attachRoot: params.attachRoot,
 		resultMode,
@@ -698,6 +828,7 @@ export function executeAsyncChain(
 			{
 				id,
 				steps,
+				workspaceId: params.workspaceId,
 				resultPath: inheritedNestedRoute ? nestedResultsPath(inheritedNestedRoute.rootRunId, id) : path.join(RESULTS_DIR, `${id}.json`),
 				cwd: runnerCwd,
 				placeholder: "{previous}",
@@ -734,6 +865,7 @@ export function executeAsyncChain(
 			},
 			id,
 			runnerCwd,
+			params.runnerDelegation,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -932,6 +1064,7 @@ export function executeAsyncSingle(
 					{
 						parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
 						agent,
+						childIdentity: params.childIdentity ?? createChildRuntimeIdentity(params.workspaceId),
 						task: taskWithOutputInstruction,
 						cwd: runnerCwd,
 						model,
@@ -942,6 +1075,8 @@ export function executeAsyncSingle(
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,
+						requestedExposure: agentConfig.exposure ?? "local",
+						requestedExposureSource: agentConfig.exposureIntentSource ?? (agentConfig.exposure !== undefined ? "agent" : "fallback"),
 						mcpDirectTools: agentConfig.mcpDirectTools,
 						completionGuard: agentConfig.completionGuard,
 						systemPrompt,
@@ -996,6 +1131,7 @@ export function executeAsyncSingle(
 			},
 			id,
 			runnerCwd,
+			params.runnerDelegation,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

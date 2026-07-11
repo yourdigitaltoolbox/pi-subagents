@@ -27,6 +27,13 @@ import {
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT } from "../../src/shared/types.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
+import {
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_EXPOSURE_REQUEST_EVENT,
+	relayExposureReplyEvent,
+	type RelayExposureEventBus,
+} from "../../src/runs/shared/relay-exposure.ts";
 import { MainWatchdogRuntime } from "../../src/watchdog/runtime.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
@@ -276,9 +283,10 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		agents = [makeAgent("echo")],
 		config: Record<string, unknown> = {},
 		asyncByDefault = false,
+		eventBus: RelayExposureEventBus = createEventBus(),
 	) {
 		return createSubagentExecutor!({
-			pi: { events: createEventBus(), getSessionName: () => undefined },
+			pi: { events: eventBus, getSessionName: () => undefined },
 			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
 			config,
 			asyncByDefault,
@@ -1334,6 +1342,35 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(mockPi.callCount(), 0);
 	});
 
+	it("blocks an incompatible configured remote-pi before spawning child Pi", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const agentDir = path.join(tempDir, "old-remote-agent-dir");
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "npm", "node_modules", "remote-pi"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:remote-pi@0.5.4"] }), "utf8");
+		fs.writeFileSync(path.join(agentDir, "npm", "node_modules", "remote-pi", "package.json"), JSON.stringify({
+			name: "remote-pi",
+			version: "0.5.4",
+			pi: { extensions: ["./dist/index.js"] },
+		}), "utf8");
+		try {
+			const executor = makeExecutor();
+			const result = await executor.execute(
+				"incompatible-remote",
+				{ agent: "echo", task: "Task" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /does not declare child-session protocol compatibility/i);
+			assert.equal(mockPi.callCount(), 0, "child Pi must not wake before compatibility passes");
+		} finally {
+			if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+		}
+	});
+
 	it("applies agent frontmatter defaults to single-agent launches", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const executor = makeExecutor([
 			makeAgent("echo", {
@@ -1357,6 +1394,549 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.details?.timeoutMs, 2_000);
 		assert.deepEqual(result.details?.turnBudget, { maxTurns: 4, graceTurns: 2 });
 	});
+
+	it("lets authorized relay intent carry one process-bound capability without suppressing extensions", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let issueRequests = 0;
+		const issueSources: unknown[] = [];
+		const lifecycleRequests: Array<Record<string, unknown>> = [];
+		let issuedLease: Record<string, unknown> | undefined;
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown>; intentSource?: unknown };
+			if (request.method === "issue") {
+				issueRequests++;
+				issueSources.push(request.intentSource);
+				const issuedAt = Date.now();
+				issuedLease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 60_000,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1,
+					requestId: request.requestId,
+					success: true,
+					ok: true,
+					capability: relayCapability,
+					lease: issuedLease,
+				});
+				return;
+			}
+			lifecycleRequests.push(raw as Record<string, unknown>);
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1,
+				requestId: request.requestId,
+				success: true,
+				ok: true,
+				state: request.method === "close" ? "closed" : "idempotent",
+				lease: issuedLease,
+			});
+		});
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
+		const executor = makeExecutor([makeAgent("echo", { exposure: "relay" })], {}, false, eventBus);
+		const inherited = await executor.execute(
+			"agent-exposure-default",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const inheritedEnv = JSON.parse(inherited.details?.results?.[0]?.finalOutput ?? "{}");
+		const inheritedDescriptor = JSON.parse(inheritedEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(inheritedDescriptor.requestedExposure, "relay");
+		assert.equal(inheritedDescriptor.intentSource, "agent");
+		assert.equal(inheritedEnv[RELAY_EXPOSURE_CAPABILITY_ENV], relayCapability);
+		assert.equal(issueRequests, 1);
+		assert.deepEqual(issueSources, ["agent"]);
+		assert.deepEqual(lifecycleRequests.map((request) => request.method), ["close"]);
+		assert.equal(lifecycleRequests[0]?.reason, "completed");
+		assert.equal("capability" in (lifecycleRequests[0] ?? {}), false);
+		assert.ok(!readCallArgs().includes("--no-extensions"));
+
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
+		const fallback = await makeExecutor([makeAgent("echo")], {}, false, eventBus).execute(
+			"remote-policy-fallback",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const fallbackEnv = JSON.parse(fallback.details?.results?.[0]?.finalOutput ?? "{}");
+		const fallbackDescriptor = JSON.parse(fallbackEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(fallbackDescriptor.requestedExposure, "local");
+		assert.equal(fallbackDescriptor.intentSource, "fallback");
+		assert.equal(fallbackEnv[RELAY_EXPOSURE_CAPABILITY_ENV], relayCapability);
+		assert.equal(issueRequests, 2);
+		assert.deepEqual(issueSources, ["agent", "fallback"]);
+
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
+		const overridden = await executor.execute(
+			"explicit-exposure",
+			{ agent: "echo", task: "Task", exposure: "off" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const overriddenEnv = JSON.parse(overridden.details?.results?.[0]?.finalOutput ?? "{}");
+		const overriddenDescriptor = JSON.parse(overriddenEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(overriddenDescriptor.requestedExposure, "off");
+		assert.equal(overriddenDescriptor.intentSource, "run");
+		assert.equal(overriddenEnv[RELAY_EXPOSURE_CAPABILITY_ENV], "");
+		assert.equal(issueRequests, 2, "off exposure must not request a relay capability");
+		assert.ok(!readCallArgs().includes("--no-extensions"));
+
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
+		const allowlisted = await makeExecutor([
+			makeAgent("echo", { exposure: "relay", extensions: ["./allowed-ext.ts"] }),
+		], {}, false, eventBus).execute(
+			"allowlisted-exposure",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const allowlistedEnv = JSON.parse(allowlisted.details?.results?.[0]?.finalOutput ?? "{}");
+		const allowlistedDescriptor = JSON.parse(allowlistedEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(allowlistedDescriptor.intentSource, "agent");
+		assert.equal(allowlistedEnv[RELAY_EXPOSURE_CAPABILITY_ENV], "");
+		assert.equal(issueRequests, 2, "an allowlist without remote-pi must not receive a bearer");
+		assert.ok(readCallArgs().includes("--no-extensions"));
+	});
+
+	it("promotes and demotes a detached foreground child through the parent exposure action", {
+		skip: !createSubagentExecutor ? "executor not importable" : undefined,
+		timeout: 5_000,
+	}, async () => {
+		const eventBus = createEventBus();
+		let lease: Record<string, unknown> | undefined;
+		const lifecycleMethods: string[] = [];
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown> };
+			lifecycleMethods.push(request.method);
+			if (request.method === "promote") {
+				const issuedAt = Date.now();
+				lease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 30_000,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true, state: "promoted", lease,
+				});
+				return;
+			}
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1,
+				requestId: request.requestId,
+				success: true,
+				ok: true,
+				state: request.method === "revoke" ? "revoked" : "closed",
+				lease,
+			});
+		});
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("request_relay_exposure", { mode: "relay", ttlMs: 30_000 })] },
+				{ delay: 750, jsonl: [events.assistantMessage("detached child finished")] },
+			],
+		});
+		const executor = makeExecutor([
+			makeAgent("echo", { exposure: "local", extensions: ["npm:remote-pi"], systemPrompt: "Intercom orchestration channel:\nUse request_relay_exposure." }),
+		], {}, false, eventBus);
+		const ctx = makeMinimalCtx(tempDir);
+		let detachEmitted = false;
+		const run = executor.execute(
+			"live-exposure-run",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			(update) => {
+				if (detachEmitted) return;
+				const progress = update.details?.progress;
+				if (!progress?.some((entry) => entry.currentTool === "request_relay_exposure")) return;
+				detachEmitted = true;
+				eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "live-exposure-detach", agent: "echo", childIndex: 0 });
+			},
+			ctx,
+		);
+		const detached = await run;
+		assert.match(detached.content[0]?.text ?? "", /Detached/i);
+		const liveRunId = detached.details?.runId;
+		assert.equal(typeof liveRunId, "string");
+
+		const promoted = await executor.execute(
+			"promote-live-exposure",
+			{ action: "exposure", id: liveRunId, index: 0, exposure: "relay", ttlMs: 30_000 },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		assert.equal(promoted.isError, undefined, JSON.stringify(promoted));
+		assert.match(promoted.content[0]?.text ?? "", /promoted|relay/i);
+
+		const demoted = await executor.execute(
+			"demote-live-exposure",
+			{ action: "exposure", id: liveRunId, index: 0, exposure: "local" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		assert.equal(demoted.isError, undefined);
+		assert.match(demoted.content[0]?.text ?? "", /revoked|local|demoted/i);
+		assert.deepEqual(lifecycleMethods.slice(0, 2), ["promote", "revoke"]);
+		assert.equal(JSON.stringify(promoted).includes("rpel1."), false);
+
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		const stale = await executor.execute(
+			"stale-live-exposure",
+			{ action: "exposure", id: liveRunId, index: 0, exposure: "relay" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		assert.equal(stale.isError, true);
+		assert.match(stale.content[0]?.text ?? "", /no live foreground/i);
+	});
+
+	it("emits a typed timeout close for an authorized foreground relay child", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let issuedLease: Record<string, unknown> | undefined;
+		const closeReasons: unknown[] = [];
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown>; reason?: unknown };
+			if (request.method === "issue") {
+				const issuedAt = Date.now();
+				issuedLease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 60_000,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					capability: relayCapability, lease: issuedLease,
+				});
+				return;
+			}
+			if (request.method === "close") closeReasons.push(request.reason);
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1, requestId: request.requestId, success: true, ok: true,
+				state: "closed", lease: issuedLease,
+			});
+		});
+		mockPi.onCall({ delay: 10_000 });
+		const executor = makeExecutor([makeAgent("slow", { exposure: "relay" })], {}, false, eventBus);
+		await executor.execute(
+			"relay-timeout",
+			{ agent: "slow", task: "Task", timeoutMs: 150 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.deepEqual(closeReasons, ["timeout"]);
+	});
+
+	it("emits controlled_shutdown instead of completed for a nonzero foreground exit", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let issuedLease: Record<string, unknown> | undefined;
+		const closeReasons: unknown[] = [];
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown>; reason?: unknown };
+			if (request.method === "issue") {
+				const issuedAt = Date.now();
+				issuedLease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 60_000,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					capability: relayCapability, lease: issuedLease,
+				});
+				return;
+			}
+			if (request.method === "close") closeReasons.push(request.reason);
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1, requestId: request.requestId, success: true, ok: true,
+				state: "closed", lease: issuedLease,
+			});
+		});
+		mockPi.onCall({ exitCode: 1, stderr: "child process failed" });
+		await makeExecutor([makeAgent("failing", { exposure: "relay" })], {}, false, eventBus).execute(
+			"relay-nonzero-exit",
+			{ agent: "failing", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.deepEqual(closeReasons, ["controlled_shutdown"]);
+	});
+
+	it("retries a lost foreground renewal reply with the same renewal ID before close", {
+		skip: !createSubagentExecutor ? "executor not importable" : undefined,
+		timeout: 7_000,
+	}, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let lease: Record<string, unknown> | undefined;
+		const renewalIds: unknown[] = [];
+		const closeRequests: Array<Record<string, unknown>> = [];
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as {
+				requestId: string;
+				method: string;
+				binding: Record<string, unknown>;
+				renewalId?: unknown;
+			};
+			if (request.method === "issue") {
+				const issuedAt = Date.now();
+				lease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 2_500,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					capability: relayCapability, lease,
+				});
+				return;
+			}
+			if (request.method === "renew") {
+				renewalIds.push(request.renewalId);
+				lease = { ...lease!, expiresAt: Date.now() + 60_000 };
+				if (renewalIds.length === 1) return; // broker applied it; reply was lost
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					state: "idempotent", lease,
+				});
+				return;
+			}
+			if (request.method === "close") closeRequests.push(raw as Record<string, unknown>);
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1, requestId: request.requestId, success: true, ok: true,
+				state: "closed", lease,
+			});
+		});
+
+		mockPi.onCall({ delay: 2_200, output: "renewed foreground finished" });
+		const executor = makeExecutor([makeAgent("slow", { exposure: "relay" })], {}, false, eventBus);
+		await executor.execute(
+			"relay-renew-retry",
+			{ agent: "slow", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(renewalIds.length, 2);
+		assert.equal(renewalIds[0], renewalIds[1], "a lost reply must retry the identical renewal operation");
+		assert.equal(closeRequests.length, 1);
+		assert.equal(closeRequests[0]?.reason, "completed");
+		assert.equal("capability" in closeRequests[0]!, false);
+	});
+
+	it("does not retry after the current foreground lease expires", {
+		skip: !createSubagentExecutor ? "executor not importable" : undefined,
+		timeout: 7_000,
+	}, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let lease: Record<string, unknown> | undefined;
+		let leaseExpiresAt = 0;
+		const renewalRequestTimes: number[] = [];
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown> };
+			if (request.method === "issue") {
+				const issuedAt = Date.now();
+				leaseExpiresAt = issuedAt + 1_005;
+				lease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: leaseExpiresAt,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					capability: relayCapability, lease,
+				});
+				return;
+			}
+			if (request.method === "renew") {
+				renewalRequestTimes.push(Date.now());
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: false, reason: "broker_unavailable",
+				});
+				return;
+			}
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1, requestId: request.requestId, success: true, ok: true,
+				state: "closed", lease,
+			});
+		});
+
+		mockPi.onCall({ delay: 1_250, output: "expired renewal finished" });
+		await makeExecutor([makeAgent("slow", { exposure: "relay" })], {}, false, eventBus).execute(
+			"relay-renew-expiry",
+			{ agent: "slow", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const renewalCountAtExit = renewalRequestTimes.length;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.equal(renewalRequestTimes.length, renewalCountAtExit, "no retry may fire after the current lease expires");
+		assert.equal(renewalRequestTimes.length <= 2, true, "one renewal plus at most one same-operation retry is bounded");
+		assert.equal(renewalRequestTimes.every((requestedAt) => requestedAt < leaseExpiresAt), true);
+	});
+
+	it("waits for an in-flight renewal before close without rearming a timer", {
+		skip: !createSubagentExecutor ? "executor not importable" : undefined,
+		timeout: 7_000,
+	}, async () => {
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const eventBus = createEventBus();
+		let lease: Record<string, unknown> | undefined;
+		const lifecycleOrder: string[] = [];
+		let renewals = 0;
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown> };
+			if (request.method === "issue") {
+				const issuedAt = Date.now();
+				lease = {
+					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+					parent: {
+						workspaceId: request.binding.workspaceId,
+						agentId: "55555555-5555-4555-8555-555555555555",
+						processEpoch: "66666666-6666-4666-8666-666666666666",
+					},
+					binding: request.binding,
+					issuedAt,
+					expiresAt: issuedAt + 2_000,
+				};
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					capability: relayCapability, lease,
+				});
+				return;
+			}
+			if (request.method === "renew") {
+				renewals++;
+				lifecycleOrder.push("renew");
+				lease = { ...lease!, expiresAt: Date.now() + 60_000 };
+				setTimeout(() => {
+					lifecycleOrder.push("renew-reply");
+					eventBus.emit(relayExposureReplyEvent(request.requestId), {
+						version: 1, requestId: request.requestId, success: true, ok: true,
+						state: "renewed", lease,
+					});
+				}, 150);
+				return;
+			}
+			if (request.method === "close") lifecycleOrder.push("close");
+			eventBus.emit(relayExposureReplyEvent(request.requestId), {
+				version: 1, requestId: request.requestId, success: true, ok: true,
+				state: "closed", lease,
+			});
+		});
+
+		mockPi.onCall({ delay: 1_050, output: "renewal race finished" });
+		const executor = makeExecutor([makeAgent("slow", { exposure: "relay" })], {}, false, eventBus);
+		await executor.execute(
+			"relay-renew-close-race",
+			{ agent: "slow", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+
+		assert.deepEqual(lifecycleOrder, ["renew", "renew-reply", "close"]);
+		assert.equal(renewals, 1, "lifecycle stop must not leave a renewal timer armed");
+	});
+
+	for (const lifecycleCase of [
+		{ name: "soft interrupt", signalKey: "interruptSignal" as const, expected: "interrupted" },
+		{ name: "outer controlled shutdown", signalKey: "signal" as const, expected: "controlled_shutdown" },
+	]) {
+		it(`emits typed ${lifecycleCase.expected} close for ${lifecycleCase.name}`, { timeout: 7_000 }, async () => {
+			const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+			const eventBus = createEventBus();
+			let lease: Record<string, unknown> | undefined;
+			const closeReasons: unknown[] = [];
+			eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+				const request = raw as { requestId: string; method: string; binding: Record<string, unknown>; reason?: unknown };
+				if (request.method === "issue") {
+					const issuedAt = Date.now();
+					lease = {
+						relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
+						parent: {
+							workspaceId: request.binding.workspaceId,
+							agentId: "55555555-5555-4555-8555-555555555555",
+							processEpoch: "66666666-6666-4666-8666-666666666666",
+						},
+						binding: request.binding,
+						issuedAt,
+						expiresAt: issuedAt + 60_000,
+					};
+					eventBus.emit(relayExposureReplyEvent(request.requestId), {
+						version: 1, requestId: request.requestId, success: true, ok: true,
+						capability: relayCapability, lease,
+					});
+					return;
+				}
+				if (request.method === "close") closeReasons.push(request.reason);
+				eventBus.emit(relayExposureReplyEvent(request.requestId), {
+					version: 1, requestId: request.requestId, success: true, ok: true,
+					state: "closed", lease,
+				});
+			});
+			mockPi.onCall({ delay: 10_000 });
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 200);
+			await runSync(tempDir, [makeAgent("slow", { exposure: "relay" })], "slow", "Task", {
+				runId: `relay-${lifecycleCase.signalKey}`,
+				intercomEvents: eventBus,
+				[lifecycleCase.signalKey]: controller.signal,
+			});
+			assert.deepEqual(closeReasons, [lifecycleCase.expected]);
+		});
+	}
 
 	it("lets agent frontmatter override the global async default", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "agent foreground default finished" });

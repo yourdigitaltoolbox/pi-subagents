@@ -214,6 +214,16 @@ function sanitizeTurnBudget(value: unknown): TurnBudgetState | undefined {
 	};
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function sanitizedRuntimeIdentity(raw: Record<string, unknown>): { workspaceId: string; agentId: string } | undefined {
+	const workspaceId = stringValue(raw.workspaceId, 64);
+	const agentId = stringValue(raw.agentId, 64);
+	return workspaceId && agentId && UUID_PATTERN.test(workspaceId) && UUID_PATTERN.test(agentId)
+		? { workspaceId: workspaceId.toLowerCase(), agentId: agentId.toLowerCase() }
+		: undefined;
+}
+
 function sanitizeState(value: unknown, fallback: NestedRunState): NestedRunState {
 	return value === "queued" || value === "running" || value === "complete" || value === "failed" || value === "paused" || value === "stopped"
 		? value
@@ -225,11 +235,13 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 	const raw = input as Record<string, unknown>;
 	const agent = stringValue(raw.agent, 128);
 	if (!agent) return undefined;
+	const identity = sanitizedRuntimeIdentity(raw);
 	const status = raw.status === "pending" || raw.status === "running" || raw.status === "complete" || raw.status === "completed" || raw.status === "failed" || raw.status === "paused" || raw.status === "stopped"
 		? raw.status
 		: "pending";
 	return {
 		agent,
+		...(identity ?? {}),
 		status,
 		...(stringValue(raw.sessionFile, 2048) ? { sessionFile: stringValue(raw.sessionFile, 2048) } : {}),
 		...(raw.activityState === "active_long_running" || raw.activityState === "needs_attention" ? { activityState: raw.activityState } : {}),
@@ -261,6 +273,7 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		: undefined;
 	const totalTokens = sanitizeTokenUsage(raw.totalTokens);
 	const totalCost = sanitizeCost(raw.totalCost);
+	const identity = sanitizedRuntimeIdentity(raw);
 	return {
 		id: raw.id,
 		parentRunId: raw.parentRunId,
@@ -268,6 +281,7 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		...(stringValue(raw.parentAgent, 128) ? { parentAgent: stringValue(raw.parentAgent, 128) } : {}),
 		depth: Math.min(Math.max(0, clampNumber(raw.depth) ?? 0), MAX_DEPTH),
 		path: pathParts,
+		...(identity ?? {}),
 		state: sanitizeState(raw.state, "running"),
 		...(stringValue(raw.asyncDir, 2048) ? { asyncDir: stringValue(raw.asyncDir, 2048) } : {}),
 		...(clampNumber(raw.pid) !== undefined && clampNumber(raw.pid)! > 0 && Number.isInteger(clampNumber(raw.pid)) ? { pid: clampNumber(raw.pid) } : {}),
@@ -870,8 +884,12 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.endedAt !== undefined ? { endedAt: status.endedAt } : {}),
 		lastUpdate: status.lastUpdate ?? fallback.ts,
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
+		...(status.steps?.length === 1 && status.steps[0]?.workspaceId && status.steps[0]?.agentId
+			? { workspaceId: status.steps[0].workspaceId, agentId: status.steps[0].agentId }
+			: {}),
 		...(status.steps?.length ? { steps: status.steps.map((step) => ({
 			agent: step.agent,
+			...(step.workspaceId && step.agentId ? { workspaceId: step.workspaceId, agentId: step.agentId } : {}),
 			status: step.status,
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.activityState ? { activityState: step.activityState } : {}),

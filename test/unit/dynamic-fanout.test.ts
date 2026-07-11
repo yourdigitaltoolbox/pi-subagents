@@ -29,10 +29,13 @@ describe("dynamic fanout helpers", () => {
 			parallel: { agent: "reviewer", task: "Review {target.path}", label: "Review {target.path}" },
 			collect: { as: "reviews" },
 		};
-		const materialized = materializeDynamicParallelStep(step, outputs, 1);
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const materialized = materializeDynamicParallelStep(step, outputs, 1, { workspaceId });
 		assert.deepEqual(materialized.items.map((item) => item.key), ["src/a.ts", "src/b.ts"]);
 		assert.deepEqual(materialized.parallel.map((task) => task.task), ["Review src/a.ts", "Review src/b.ts"]);
 		assert.deepEqual(materialized.parallel.map((task) => task.label), ["Review src/a.ts", "Review src/b.ts"]);
+		assert.deepEqual(new Set(materialized.parallel.map((task) => task.childIdentity?.workspaceId)), new Set([workspaceId]));
+		assert.equal(new Set(materialized.parallel.map((task) => task.childIdentity?.agentId)).size, 2);
 	});
 
 	it("rejects missing structured sources, over-limit arrays, duplicate keys, colliding ids, and bad templates", () => {
@@ -123,16 +126,25 @@ describe("dynamic fanout helpers", () => {
 		}
 	});
 
-	it("accepts a runner-injected parentSessionId on the parallel template but keeps it out of user-facing validation", () => {
-		// Regression: the async runner threads parentSessionId onto the dynamic parallel
-		// template for permission-system forwarding. It must pass runner-internal validation
-		// (allowRunnerFields) without leaking into the user-facing dynamic field whitelist.
+	it("preserves runner-only session and exposure-source metadata without admitting it as user input", () => {
+		// Regression: the async runner threads internal metadata onto the dynamic parallel
+		// template. It must survive materialization under runner validation without leaking
+		// into the user-facing dynamic field whitelist.
 		const runnerStep = {
 			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
-			parallel: { agent: "reviewer", task: "Review {item.path}", parentSessionId: "session-parent" },
+			parallel: {
+				agent: "reviewer",
+				task: "Review {item.path}",
+				parentSessionId: "session-parent",
+				requestedExposure: "local",
+				requestedExposureSource: "fallback",
+			},
 			collect: { as: "reviews" },
 		} as unknown as Parameters<typeof validateDynamicStepShape>[0];
 		assert.doesNotThrow(() => validateDynamicStepShape(runnerStep, 1, { allowRunnerFields: true }));
+		const materialized = materializeDynamicParallelStep(runnerStep as never, outputs, 1, { allowRunnerFields: true });
+		assert.equal(materialized.parallel[0]?.requestedExposure, "local");
+		assert.equal(materialized.parallel[0]?.requestedExposureSource, "fallback");
 		assert.throws(
 			() => validateDynamicStepShape(runnerStep, 1),
 			(error: unknown) => error instanceof DynamicFanoutError && /parentSessionId/.test(error.message),

@@ -228,6 +228,24 @@ describe("nested control routing", () => {
 		}
 	});
 
+	it("denies relay exposure mutation from child-safe fanout mode", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-child-safe-exposure-"));
+		try {
+			const result = await createExecutor(createState(), [], false).execute(
+				"exposure",
+				{ action: "exposure", id: "claimed-live-run", index: 0, exposure: "relay", ttlMs: 30_000 },
+				new AbortController().signal,
+				undefined,
+				ctx(root),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(text(result), /not available from child-safe subagent fanout mode/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not let bare interrupt target hidden nested descendants", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-bare-interrupt-"));
 		try {

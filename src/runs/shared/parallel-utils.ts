@@ -1,8 +1,11 @@
+import type { ChildExposureIntentSource, ChildExposureMode, ChildRuntimeIdentity } from "./child-session-contract.ts";
+
 export interface RunnerSubagentStep {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
 	agent: string;
 	task: string;
+	childIdentity?: ChildRuntimeIdentity;
 	importAsyncRoot?: {
 		runId: string;
 		asyncDir: string;
@@ -20,6 +23,8 @@ export interface RunnerSubagentStep {
 	tools?: string[];
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];
+	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	mcpDirectTools?: string[];
 	completionGuard?: boolean;
 	systemPrompt?: string | null;

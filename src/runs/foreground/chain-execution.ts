@@ -106,6 +106,7 @@ interface ParallelChainRunInput {
 	intercomEvents?: IntercomEventBus;
 	cwd?: string;
 	runId: string;
+	workspaceId?: string;
 	globalTaskIndex: number;
 	sessionDirForIndex: (idx?: number) => string | undefined;
 	sessionFileForIndex?: (idx?: number) => string | undefined;
@@ -308,6 +309,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				allowIntercomDetach: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents: input.intercomEvents,
 				runId: input.runId,
+				workspaceId: input.workspaceId,
 				index: input.globalTaskIndex + taskIndex,
 				sessionDir: input.sessionDirForIndex(input.globalTaskIndex + taskIndex),
 				sessionFile: input.sessionFileForTask?.(task.agent, input.globalTaskIndex + taskIndex)
@@ -408,6 +410,7 @@ interface ChainExecutionParams {
 	intercomEvents?: IntercomEventBus;
 	signal?: AbortSignal;
 	runId: string;
+	workspaceId?: string;
 	cwd?: string;
 	shareEnabled: boolean;
 	sessionDirForIndex: (idx?: number) => string | undefined;
@@ -712,6 +715,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					intercomEvents,
 					cwd,
 					runId,
+					workspaceId: params.workspaceId,
 					globalTaskIndex,
 					sessionDirForIndex,
 					sessionFileForIndex,
@@ -834,7 +838,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			const reservedDynamicItems = step.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0;
 			let materialized: ReturnType<typeof materializeDynamicParallelStep>;
 			try {
-				materialized = materializeDynamicParallelStep(step, outputs, stepIndex, { maxItems: params.dynamicFanoutMaxItems });
+				materialized = materializeDynamicParallelStep(step, outputs, stepIndex, { maxItems: params.dynamicFanoutMaxItems, workspaceId: params.workspaceId });
 			} catch (error) {
 				const message = error instanceof DynamicFanoutError ? error.message : error instanceof Error ? error.message : String(error);
 				dynamicGroupStatuses[stepIndex] = { status: "failed", error: message };
@@ -932,6 +936,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				intercomEvents,
 				cwd,
 				runId,
+				workspaceId: params.workspaceId,
 				globalTaskIndex,
 				sessionDirForIndex,
 				sessionFileForIndex,
@@ -1170,6 +1175,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents,
 				runId,
+				workspaceId: params.workspaceId,
 				index: childIndex,
 				sessionDir: sessionDirForIndex(childIndex),
 				sessionFile: sessionFileForTask?.(seqStep.agent, childIndex)

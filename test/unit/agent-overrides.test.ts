@@ -128,6 +128,7 @@ describe("builtin agent overrides", () => {
 						inheritProjectContext: true,
 						inheritSkills: true,
 						subagentOnlyExtensions: ["./tools/child-review.ts"],
+						exposure: "relay",
 						completionGuard: false,
 					},
 				},
@@ -143,6 +144,7 @@ describe("builtin agent overrides", () => {
 		assert.equal(reviewer.inheritProjectContext, true);
 		assert.equal(reviewer.inheritSkills, true);
 		assert.deepEqual(reviewer.subagentOnlyExtensions, ["./tools/child-review.ts"]);
+		assert.equal(reviewer.exposure, "relay");
 		assert.equal(reviewer.completionGuard, false);
 		assert.equal(reviewer.override?.scope, "user");
 		assert.equal(reviewer.override?.path, path.join(tempHome, ".pi", "agent", "settings.json"));

@@ -21,7 +21,7 @@ interface ExecutorResult {
 	details?: {
 		mode?: string;
 		runId?: string;
-		results?: Array<{ agent?: string; finalOutput?: string }>;
+		results?: Array<{ agent?: string; finalOutput?: string; workspaceId?: string; agentId?: string; sessionFile?: string }>;
 		asyncId?: string;
 	};
 }
@@ -110,7 +110,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		removeTempDir(tempDir);
 	});
 
-	async function readMockCallArgs(index: number): Promise<string[]> {
+	async function readMockCall(index: number): Promise<{ args: string[]; childDescriptor: string | null }> {
 		const deadline = Date.now() + 10_000;
 		let callFile: string | undefined;
 		while (!callFile) {
@@ -121,7 +121,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 		assert.ok(callFile, `expected mock pi call at index ${index}`);
-		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args: string[]; childDescriptor: string | null };
+	}
+
+	async function readMockCallArgs(index: number): Promise<string[]> {
+		return (await readMockCall(index)).args;
 	}
 
 	async function waitForFile(filePath: string, timeoutMs = 10_000): Promise<void> {
@@ -586,17 +590,22 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		mockPi.onCall({ output: "first child done" });
 		mockPi.onCall({ output: "second child done" });
 		mockPi.onCall({ output: "revived foreground answer" });
-		const { executor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a"), makeAgent("b")] });
+		const agentA = makeAgent("a", { exposure: "local" });
+		const agentB = makeAgent("b", { exposure: "local" });
+		const { executor } = makeExecutor({ bridgeMode: "off", agents: [agentA, agentB] });
 
 		const original = await executor.execute(
 			"foreground-resume-original",
-			{ tasks: [{ agent: "a", task: "task-a" }, { agent: "b", task: "task-b" }] },
+			{ tasks: [{ agent: "a", task: "task-a" }, { agent: "b", task: "task-b" }], exposure: "relay" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 		const runId = original.details?.runId;
 		assert.ok(runId, "expected foreground run id");
+		// Changing the current agent default must not rewrite the original explicit
+		// per-run intent when resume does not supply a new override.
+		agentB.exposure = "off";
 
 		const revived = await executor.execute(
 			"foreground-resume",
@@ -610,8 +619,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(revived.content[0]?.text ?? "", /Revived foreground subagent from/);
 		assert.match(revived.content[0]?.text ?? "", /Agent: b/);
 		const reviveArgs = await readMockCallArgs(2);
-		const selectedSession = original.details?.results?.[1]?.sessionFile;
+		const selectedChild = original.details?.results?.[1];
+		const selectedSession = selectedChild?.sessionFile;
 		assert.ok(selectedSession, "expected selected child session file");
+		assert.ok(selectedChild?.workspaceId, "expected selected child workspace id");
+		assert.ok(selectedChild?.agentId, "expected selected child agent id");
 		assert.equal(reviveArgs[reviveArgs.indexOf("--session") + 1], selectedSession);
 		const revivedId = revived.details?.asyncId;
 		assert.ok(revivedId, "expected revived async id");
@@ -621,6 +633,119 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			if (Date.now() > deadline) assert.fail(`Timed out waiting for revived result file: ${resultPath}`);
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
+		const revivedResult = JSON.parse(fs.readFileSync(resultPath, "utf8")) as { results?: Array<{ workspaceId?: string; agentId?: string }> };
+		assert.equal(revivedResult.results?.[0]?.workspaceId, selectedChild.workspaceId);
+		assert.equal(revivedResult.results?.[0]?.agentId, selectedChild.agentId);
+		// Parallel children may reach the mock in either order. Select the original
+		// descriptor by the stable logical child ID rather than call position.
+		const originalDescriptors = await Promise.all([readMockCall(0), readMockCall(1)])
+			.then((calls) => calls.map((call) => JSON.parse(call.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string }));
+		const originalDescriptor = originalDescriptors.find((descriptor) => descriptor.agentId === selectedChild.agentId);
+		assert.ok(originalDescriptor, "expected original descriptor for selected logical child");
+		const revivedCall = await readMockCall(2);
+		const revivedDescriptor = JSON.parse(revivedCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string };
+		assert.equal(revivedDescriptor.workspaceId, originalDescriptor.workspaceId);
+		assert.equal(revivedDescriptor.agentId, originalDescriptor.agentId);
+		assert.notEqual(revivedDescriptor.processEpoch, originalDescriptor.processEpoch);
+		assert.equal(originalDescriptor.requestedExposure, "relay");
+		assert.equal(originalDescriptor.intentSource, "run");
+		assert.equal(revivedDescriptor.requestedExposure, "relay");
+		assert.equal(revivedDescriptor.intentSource, "run");
+	});
+
+	it("resume restores a completed foreground child's identity after parent executor restart", async () => {
+		mockPi.onCall({ output: "original foreground answer" });
+		mockPi.onCall({ output: "revived after parent restart" });
+		const parentSessionFile = path.join(tempDir, "parent-session.jsonl");
+		fs.writeFileSync(parentSessionFile, "", "utf-8");
+		const ctx = makeMinimalCtx(tempDir);
+		ctx.sessionManager.getSessionFile = () => parentSessionFile;
+
+		const { executor: originalExecutor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+		const original = await originalExecutor.execute(
+			"foreground-restart-original",
+			{ agent: "a", task: "original task" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		const runId = original.details?.runId;
+		const originalChild = original.details?.results?.[0];
+		assert.ok(runId, "expected foreground run id");
+		assert.ok(originalChild?.workspaceId, "expected original workspace id");
+		assert.ok(originalChild?.agentId, "expected original agent id");
+		assert.ok(originalChild?.sessionFile, "expected original session file");
+
+		// A fresh executor models an extension/parent-process restart: its
+		// in-memory foregroundRuns map starts empty but the parent session tree
+		// and completed child session remain on disk.
+		const { executor: restartedExecutor, state: restartedState } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+		assert.equal(restartedState.foregroundRuns.size, 0);
+		const revived = await restartedExecutor.execute(
+			"foreground-restart-resume",
+			{ action: "resume", id: runId, message: "continue after restart" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+
+		assert.equal(revived.isError, undefined);
+		assert.match(revived.content[0]?.text ?? "", /Revived foreground subagent from/);
+		const revivedId = revived.details?.asyncId;
+		assert.ok(revivedId, "expected revived async id");
+		const resultPath = path.join(RESULTS_DIR, `${revivedId}.json`);
+		await waitForFile(resultPath);
+		const revivedResult = JSON.parse(fs.readFileSync(resultPath, "utf8")) as { results?: Array<{ workspaceId?: string; agentId?: string }> };
+		assert.equal(revivedResult.results?.[0]?.workspaceId, originalChild.workspaceId);
+		assert.equal(revivedResult.results?.[0]?.agentId, originalChild.agentId);
+		const originalDescriptor = JSON.parse((await readMockCall(0)).childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+		const revivedDescriptor = JSON.parse((await readMockCall(1)).childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+		assert.equal(revivedDescriptor.workspaceId, originalDescriptor.workspaceId);
+		assert.equal(revivedDescriptor.agentId, originalDescriptor.agentId);
+		assert.notEqual(revivedDescriptor.processEpoch, originalDescriptor.processEpoch);
+	});
+
+	it("leaving a persisted parent session isolates its foreground revive namespace", async () => {
+		mockPi.onCall({ output: "persisted parent child" });
+		mockPi.onCall({ output: "sessionless child" });
+		const parentSessionFile = path.join(tempDir, "parent-session.jsonl");
+		fs.writeFileSync(parentSessionFile, "", "utf-8");
+		const persistedCtx = makeMinimalCtx(tempDir);
+		persistedCtx.sessionManager.getSessionFile = () => parentSessionFile;
+		const { executor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+
+		const original = await executor.execute(
+			"foreground-session-isolation-original",
+			{ agent: "a", task: "persisted task" },
+			new AbortController().signal,
+			undefined,
+			persistedCtx,
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected persisted foreground run id");
+		const ledgerPath = path.join(tempDir, "foreground-runs.json");
+		assert.equal(fs.existsSync(ledgerPath), true);
+		const ledgerBefore = fs.readFileSync(ledgerPath, "utf8");
+
+		const sessionlessCtx = makeMinimalCtx(tempDir);
+		const crossSessionResume = await executor.execute(
+			"foreground-session-isolation-resume",
+			{ action: "resume", id: runId, message: "must not cross sessions" },
+			new AbortController().signal,
+			undefined,
+			sessionlessCtx,
+		);
+		assert.equal(crossSessionResume.isError, true);
+		assert.match(crossSessionResume.content[0]?.text ?? "", /not found/i);
+
+		await executor.execute(
+			"foreground-session-isolation-sessionless",
+			{ agent: "a", task: "sessionless task" },
+			new AbortController().signal,
+			undefined,
+			sessionlessCtx,
+		);
+		assert.equal(fs.readFileSync(ledgerPath, "utf8"), ledgerBefore);
 	});
 
 	it("status recovers remembered detached foreground output after child exit", async () => {

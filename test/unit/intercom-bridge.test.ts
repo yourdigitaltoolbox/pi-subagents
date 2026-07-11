@@ -151,7 +151,7 @@ describe("applyIntercomBridgeToAgent", () => {
 
 	it("injects intercom tool and prompt instructions", () => {
 		const updated = applyIntercomBridgeToAgent(makeAgent({ tools: ["read", "bash"] }), activeBridge);
-		assert.deepEqual(updated.tools, ["read", "bash", "intercom", "contact_supervisor"]);
+		assert.deepEqual(updated.tools, ["read", "bash", "intercom", "contact_supervisor", "request_relay_exposure"]);
 		assert.match(updated.systemPrompt, /Intercom orchestration channel:/);
 		assert.match(updated.systemPrompt, /contact_supervisor/);
 	});
@@ -167,7 +167,7 @@ describe("applyIntercomBridgeToAgent", () => {
 	it("does not block native supervisor tools for agents with explicit extension allowlists", () => {
 		const agent = makeAgent({ tools: ["read"], extensions: ["/tmp/other-extension/index.ts"] });
 		const updated = applyIntercomBridgeToAgent(agent, activeBridge);
-		assert.deepEqual(updated.tools, ["read", "intercom", "contact_supervisor"]);
+		assert.deepEqual(updated.tools, ["read", "intercom", "contact_supervisor", "request_relay_exposure"]);
 		assert.match(updated.systemPrompt, /contact_supervisor/);
 	});
 });

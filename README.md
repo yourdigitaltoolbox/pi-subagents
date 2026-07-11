@@ -304,6 +304,17 @@ Packaged `planner`, `worker`, and `oracle` default to forked context when a laun
 
 Child-safety boundaries are enforced at runtime. Spawned child sessions do not receive the bundled `pi-subagents` skill, and forked child context filtering removes parent-only subagent artifacts (including old hidden orchestration-instruction messages, slash/status/control messages, and prior parent `subagent` tool-call/tool-result history) while preserving ordinary prose and unrelated tool calls/results. By default, children do not register the `subagent` tool and receive boundary instructions that they are not the parent orchestrator and must not propose or run subagents. The explicit exception is an agent whose resolved builtin `tools` includes `subagent`; that child gets a child-safe `subagent` tool for the fanout work the parent assigned, still bounded by `maxSubagentDepth`.
 
+Every tracked child launch also carries the versioned, non-secret `PI_SUBAGENT_DESCRIPTOR` contract. Fresh siblings share one protected/inherited `workspaceId`, each logical child receives its own `agentId`, resume retains those IDs, and every process attempt rotates `processEpoch`; these are correlation fields, not credentials. Exposure is typed intent, never relay authorization: explicit run `exposure` wins first, then agent frontmatter; if neither exists, pi-subagents emits a safe local wire mode with `intentSource: "fallback"` so remote-pi alone can apply its protected project child policy and final built-in local default. Foreground and detached-runner requests carry that source separately. One async runner token is source-fenced per child, so a run/agent-authorized sibling cannot elevate a fallback child. When remote-pi is absent, launches continue normally. When remote-pi is configured or resolvable, pi-subagents reads its package protocol metadata immediately before returning spawn arguments and blocks an old, malformed, unresolved, or incompatible pairing before child Pi wakes. This policy never changes extension selection: omitted `extensions` still means normal Pi extension inheritance, and exposure handling never injects `--no-extensions`.
+
+When workspace correlation comes from remote-pi's cwd config, pi-subagents
+requires the versioned schema, private ownership/modes, safe fields, and
+no-follow opened-file validation; rejected bytes fall back to parent-session
+correlation instead of becoming trusted identity. As with remote-pi's own cwd
+config, portable Node does not claim protection against a malicious process
+already running as the same OS user and racing path components between
+syscalls. That local-user compromise boundary cannot grant authority through
+these non-secret IDs.
+
 ## Optional shortcuts
 
 The package includes reusable prompt templates for common workflows. You do not need them, but they are handy when you want the same shape every time:
@@ -658,7 +669,7 @@ Example:
 }
 ```
 
-Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` in builtin overrides to clear an inherited context default. Project overrides beat user overrides.
+Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `exposure`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` in builtin overrides to clear an inherited context default. Project overrides beat user overrides.
 
 Set `subagents.defaultModel` to give all subagents without an explicit model their own default model, separate from the parent session model. Per-agent model overrides and agent frontmatter still win.
 
@@ -694,6 +705,7 @@ description: Fast codebase recon
 tools: read, grep, find, ls, bash, mcp:chrome-devtools
 extensions:
 subagentOnlyExtensions: ./tools/child-only-search.ts
+exposure: local
 model: claude-haiku-4-5
 fallbackModels: openai/gpt-5-mini, anthropic/claude-sonnet-4
 thinking: high
@@ -723,6 +735,7 @@ Important fields:
 | `tools` | Builtin tool allowlist. `mcp:` entries select direct MCP tools when `pi-mcp-adapter` is installed. |
 | `extensions` | Omitted means normal extensions; empty means no extensions; comma-separated values allowlist specific extensions. |
 | `subagentOnlyExtensions` | Comma-separated extension paths loaded only in spawned child sessions for this agent. Tools registered there are unavailable to the main agent unless also installed through normal Pi extension configuration. |
+| `exposure` | Optional remote-pi exposure request: `off`, `local`, or `relay`. An explicit run value wins over this agent default; absence remains an unresolved remote-policy fallback. This is non-authoritative intent, never relay authorization. |
 | `model` | Default model. Bare ids prefer the current provider when possible, then unique registry matches. |
 | `fallbackModels` | Ordered backup models for provider/model failures such as quota, auth, timeout, or unavailable model. Ordinary task failures do not trigger fallback. |
 | `thinking` | Appended as a `:level` suffix at runtime unless a suffix is already present. |
@@ -1112,6 +1125,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `worktree` | boolean | false | Create isolated git worktrees for parallel tasks. |
 | `chain` | array | - | Sequential, static parallel, and dynamic fanout chain steps. Steps and chain parallel tasks support `phase`, `label`, `as`, `outputSchema`, and `acceptance` in addition to the usual execution fields. Dynamic fanout uses `expand`, one child `parallel` template, and `collect`. With `action: "append-step"`, pass exactly one step to append to a running async chain. |
 | `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each agent uses its own `defaultContext`; `fork` creates real branched sessions from the parent leaf. Packaged `planner`, `worker`, and `oracle` default to `fork`. |
+| `exposure` | `off \| local \| relay` | agent default, then remote-pi fallback | Non-authoritative remote-pi exposure request for every child in this invocation. Explicit run value wins; relay still requires protected remote-pi policy/delegation and a bounded process lease. |
 | `chainDir` | string | temp chain dir | Persistent directory for chain artifacts. |
 | `view` | `fleet \| transcript` | - | Optional `status` view for the active fleet surface or transcript tail inspection. |
 | `lines` | number | `80` | Maximum transcript lines for `action: "status", view: "transcript"`; capped at 500. |
@@ -1157,7 +1171,7 @@ subagent({ action: "doctor" })
 
 `status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. `view: "fleet"` is an optional read-only active-run surface with transcript commands; it does not add steering or stop controls. `view: "transcript"` tails the selected run's live `output-<index>.log` or persisted session transcript, with `lines` capped at 500. Nested status shows the root/parent path, nested children, session/artifact paths when known, and nested control commands. Inside child-safe fanout mode, bare `status` requires an id when no local foreground run is active, so children cannot enumerate unrelated top-level async runs. Bare `interrupt` still targets only the visible top-level run; interrupting a nested run requires its explicit nested id.
 
-`resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child. Nested runs can be resumed by nested id when their live route or persisted session metadata is available. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
+`resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child. Nested runs can be resumed by nested id when their live route or persisted session metadata is available. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file. Validated launch exposure mode/source is retained as non-secret durable run intent and reevaluated by current remote-pi policy; a new explicit `exposure` override replaces it, while incidental live promotion is never retained. The record is a request, not authority: every revive rotates `processEpoch` and needs fresh live parent authorization/current remote-pi policy. Completed async status/result records must agree when both carry intent. As with other same-user Pi session artifacts, malicious same-UID rewriting is local-user compromise outside this contract; bearer capabilities, runner tokens, and nonces are never persisted there.
 
 `stop` ends a current-session top-level async run. It is deliberately stronger than `interrupt`: it is not a resumable pause, stopped runs should be restarted as new runs, foreground and nested targets are rejected, direct id calls execute immediately, and `/subagents-stop` without an id opens a selector with confirmation when a TUI is available. In non-TUI contexts the slash command prints exact `subagent({ action: "stop", id })` and `/subagents-stop <id>` commands. Scheduled jobs can appear in the selector, but they are labeled as scheduled cancellations and route through `schedule-cancel`, not `stop`.
 

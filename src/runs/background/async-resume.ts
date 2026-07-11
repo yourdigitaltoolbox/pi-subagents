@@ -4,6 +4,7 @@ import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SubagentState } from "..
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
+import { createChildRuntimeIdentity, resolveChildWorkspaceId, validateChildRuntimeIdentity, validateChildWorkspaceId, type ChildExposureIntentSource, type ChildExposureMode, type ChildRuntimeIdentity } from "../shared/child-session-contract.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
@@ -37,6 +38,9 @@ export type AsyncResumeTarget = {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
+	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
+	childIdentity: ChildRuntimeIdentity;
 };
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
@@ -88,7 +92,7 @@ interface AsyncResultFile {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string; workspaceId?: string; agentId?: string; requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource }>;
 }
 
 export interface AsyncRunLocation {
@@ -115,6 +119,28 @@ function validateOptionalString(value: Record<string, unknown>, field: string, s
 	return fieldValue;
 }
 
+function validateExposureIntent(
+	mode: unknown,
+	source: unknown,
+	label: string,
+): { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource } {
+	if ((mode === undefined) !== (source === undefined)) throw new Error(`${label} has incomplete exposure intent.`);
+	if (mode === undefined) return {};
+	if (mode !== "off" && mode !== "local" && mode !== "relay") throw new Error(`${label}.requestedExposure must be off, local, or relay.`);
+	if (source !== "run" && source !== "agent" && source !== "fallback") throw new Error(`${label}.requestedExposureSource must be run, agent, or fallback.`);
+	return { requestedExposure: mode, requestedExposureSource: source };
+}
+
+function exposureIntentsConflict(
+	left: { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource },
+	right: { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource },
+): boolean {
+	return left.requestedExposure !== undefined
+		&& right.requestedExposure !== undefined
+		&& (left.requestedExposure !== right.requestedExposure
+			|| left.requestedExposureSource !== right.requestedExposureSource);
+}
+
 function validateResultFile(value: unknown, resultPath: string): AsyncResultFile {
 	const data = ensureObject(value, resultPath);
 	const resultsValue = data.results;
@@ -128,9 +154,12 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const intercomTarget = validateOptionalString(child, "intercomTarget", resultPath, `results[${index}].intercomTarget`);
 			const model = validateOptionalString(child, "model", resultPath, `results[${index}].model`);
 			const thinking = validateOptionalString(child, "thinking", resultPath, `results[${index}].thinking`);
+			const workspaceId = validateOptionalString(child, "workspaceId", resultPath, `results[${index}].workspaceId`);
+			const agentId = validateOptionalString(child, "agentId", resultPath, `results[${index}].agentId`);
+			const exposureIntent = validateExposureIntent(child.requestedExposure, child.requestedExposureSource, `Invalid async result file '${resultPath}': results[${index}]`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, model, thinking, ...(typeof success === "boolean" ? { success } : {}) };
+			return { agent, sessionFile, intercomTarget, model, thinking, workspaceId, agentId, ...exposureIntent, ...(typeof success === "boolean" ? { success } : {}) };
 		});
 	}
 	const success = data.success;
@@ -268,6 +297,7 @@ function resultState(result: AsyncResultFile): AsyncStatus["state"] {
 
 function validateStatusForResume(status: AsyncStatus | null, source: string): void {
 	if (!status) return;
+	if (status.workspaceId !== undefined) validateChildWorkspaceId(status.workspaceId);
 	if (typeof status.runId !== "string") throw new Error(`Invalid async status '${source}': runId must be a string.`);
 	if (status.sessionId !== undefined && typeof status.sessionId !== "string") throw new Error(`Invalid async status '${source}': sessionId must be a string.`);
 	if (status.cwd !== undefined && typeof status.cwd !== "string") throw new Error(`Invalid async status '${source}': cwd must be a string.`);
@@ -281,6 +311,13 @@ function validateStatusForResume(status: AsyncStatus | null, source: string): vo
 			if (stepRecord.sessionFile !== undefined && typeof stepRecord.sessionFile !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].sessionFile must be a string.`);
 			if (stepRecord.model !== undefined && typeof stepRecord.model !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].model must be a string.`);
 			if (stepRecord.thinking !== undefined && typeof stepRecord.thinking !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].thinking must be a string.`);
+			if (stepRecord.workspaceId !== undefined && typeof stepRecord.workspaceId !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].workspaceId must be a string.`);
+			if (stepRecord.agentId !== undefined && typeof stepRecord.agentId !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].agentId must be a string.`);
+			validateExposureIntent(stepRecord.requestedExposure, stepRecord.requestedExposureSource, `Invalid async status '${source}': steps[${index}]`);
+			if ((stepRecord.workspaceId === undefined) !== (stepRecord.agentId === undefined)) throw new Error(`Invalid async status '${source}': steps[${index}] has incomplete child identity.`);
+			if (typeof stepRecord.workspaceId === "string" && typeof stepRecord.agentId === "string") {
+				validateChildRuntimeIdentity({ workspaceId: stepRecord.workspaceId, agentId: stepRecord.agentId });
+			}
 		});
 	}
 }
@@ -290,6 +327,20 @@ function validateResumeSessionFile(runId: string, sessionFile: string): string {
 	const resolved = path.resolve(sessionFile);
 	if (!fs.existsSync(resolved)) throw new Error(`Async run '${runId}' session file does not exist: ${sessionFile}`);
 	return resolved;
+}
+
+function resolvePersistedIdentity(
+	workspaceId: string | undefined,
+	agentId: string | undefined,
+	source: string,
+	fallbackWorkspaceId: string,
+): ChildRuntimeIdentity {
+	if ((workspaceId === undefined) !== (agentId === undefined)) {
+		throw new Error(`${source} has incomplete child identity.`);
+	}
+	return workspaceId && agentId
+		? validateChildRuntimeIdentity({ workspaceId, agentId })
+		: createChildRuntimeIdentity(fallbackWorkspaceId);
 }
 
 export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncResumeDeps = {}, options: AsyncResumeOptions = {}): AsyncResumeTarget {
@@ -310,6 +361,11 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const runId = status?.runId ?? result?.runId ?? result?.id ?? location.resolvedId ?? (location.asyncDir ? path.basename(location.asyncDir) : "unknown");
 	const state = status?.state ?? (result ? resultState(result) : undefined);
 	if (!state) throw new Error(`Status file not found for async run '${runId}'.`);
+	const fallbackWorkspaceId = status?.workspaceId
+		? validateChildWorkspaceId(status.workspaceId)
+		: resolveChildWorkspaceId(status?.cwd ?? result?.cwd ?? process.cwd(), {
+			parentSessionId: status?.sessionId,
+		});
 	if (state === "stopped") throw new Error(`Async run '${runId}' was stopped and cannot be resumed. Start a new run instead.`);
 
 	const statusSteps = status?.steps ?? [];
@@ -336,6 +392,10 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 					sessionFile: selectedStep.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
 					model: selectedStep.model,
 					thinking: selectedStep.thinking,
+					...(selectedStep.requestedExposure && selectedStep.requestedExposureSource
+						? { requestedExposure: selectedStep.requestedExposure, requestedExposureSource: selectedStep.requestedExposureSource }
+						: {}),
+					childIdentity: resolvePersistedIdentity(selectedStep.workspaceId, selectedStep.agentId, `Async run '${runId}' child ${requestedIndex}`, fallbackWorkspaceId),
 				};
 			}
 			if (selectedStep?.status === "pending") throw new Error(`Async run '${runId}' child ${requestedIndex} is pending and has not started yet. Wait for it to run or complete before resuming.`);
@@ -360,6 +420,10 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 				sessionFile: selected.step.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
 				model: selected.step.model,
 				thinking: selected.step.thinking,
+				...(selected.step.requestedExposure && selected.step.requestedExposureSource
+					? { requestedExposure: selected.step.requestedExposure, requestedExposureSource: selected.step.requestedExposureSource }
+					: {}),
+				childIdentity: resolvePersistedIdentity(selected.step.workspaceId, selected.step.agentId, `Async run '${runId}' child ${selected.index}`, fallbackWorkspaceId),
 			};
 		}
 	}
@@ -379,6 +443,30 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
 	const stepModel = statusSteps[index]?.model ?? resultSteps[index]?.model ?? (stepCount === 1 ? result?.model : undefined);
 	const stepThinking = statusSteps[index]?.thinking ?? resultSteps[index]?.thinking ?? (stepCount === 1 ? result?.thinking : undefined);
+	const statusExposureIntent = validateExposureIntent(
+		statusSteps[index]?.requestedExposure,
+		statusSteps[index]?.requestedExposureSource,
+		`Async run '${runId}' child ${index} status`,
+	);
+	const resultExposureIntent = validateExposureIntent(
+		resultSteps[index]?.requestedExposure,
+		resultSteps[index]?.requestedExposureSource,
+		`Async run '${runId}' child ${index} result`,
+	);
+	if (exposureIntentsConflict(statusExposureIntent, resultExposureIntent)) {
+		throw new Error(`Async run '${runId}' child ${index} has conflicting durable exposure intent.`);
+	}
+	// These files retain non-secret parent-requested intent, not authority. A
+	// revive still rotates processEpoch and needs fresh live remote-pi parent
+	// authorization/current policy. Same-UID malicious file editing is outside
+	// the documented local threat boundary; cooperative record disagreement is
+	// detected above rather than silently preferring one valid pair.
+	const exposureIntent = statusExposureIntent.requestedExposure !== undefined
+		? statusExposureIntent
+		: resultExposureIntent;
+	const workspaceId = statusSteps[index]?.workspaceId ?? resultSteps[index]?.workspaceId;
+	const agentId = statusSteps[index]?.agentId ?? resultSteps[index]?.agentId;
+	const childIdentity = resolvePersistedIdentity(workspaceId, agentId, `Async run '${runId}' child ${index}`, fallbackWorkspaceId);
 
 	return {
 		kind: "revive",
@@ -387,11 +475,13 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		state,
 		agent,
 		index,
+		childIdentity,
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
 		...(stepModel ? { model: stepModel } : {}),
 		...(stepThinking ? { thinking: stepThinking } : {}),
+		...exposureIntent,
 	};
 }
 

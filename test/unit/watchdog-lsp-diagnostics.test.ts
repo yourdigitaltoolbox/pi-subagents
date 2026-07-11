@@ -98,7 +98,16 @@ describe("watchdog LSP diagnostics", () => {
 			fs.mkdirSync(binDir, { recursive: true });
 			fs.writeFileSync(path.join(temp, "src", "file.ts"), "export const value = 1;\n", "utf-8");
 			const scriptPath = path.join(binDir, "tls-malformed.js");
-			fs.writeFileSync(scriptPath, "process.stdout.write('Content-Length: 8\\r\\n\\r\\nnot-json'); setTimeout(() => process.exit(0), 50);\n", "utf-8");
+			const pidPath = path.join(binDir, "tls-malformed.pid");
+			fs.writeFileSync(scriptPath, [
+				"const fs = require('node:fs');",
+				"fs.writeFileSync(__dirname + '/tls-malformed.pid', String(process.pid));",
+				"process.on('SIGTERM', () => {});",
+				"fs.closeSync(0);",
+				"process.stdout.write('Content-Length: 8\\r\\n\\r\\nnot-json');",
+				"setInterval(() => {}, 1000);",
+				"",
+			].join("\n"), "utf-8");
 			if (process.platform === "win32") {
 				fs.writeFileSync(path.join(binDir, "typescript-language-server.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0\\tls-malformed.js" %*\r\n`, "utf-8");
 			} else {
@@ -110,11 +119,13 @@ describe("watchdog LSP diagnostics", () => {
 				cwd: temp,
 				root: temp,
 				changedPaths: ["src/file.ts"],
-				config: { enabled: true, timeoutMs: 500, maxFiles: 10, maxDiagnostics: 10 },
+				config: { enabled: true, timeoutMs: 2_000, maxFiles: 10, maxDiagnostics: 10 },
 			});
 
 			assert.equal(diagnostics.status, "failed");
 			assert.match(diagnostics.message ?? "", /Invalid LSP JSON-RPC response/);
+			const serverPid = Number(fs.readFileSync(pidPath, "utf8"));
+			assert.throws(() => process.kill(serverPid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH");
 		} finally {
 			try {
 				fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

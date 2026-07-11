@@ -24,6 +24,7 @@ import {
 	events,
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 
 interface TestSequentialStep {
 	agent: string;
@@ -204,6 +205,20 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 			"utf-8",
 		);
 	}
+
+	it("emits the child descriptor for sequential chain steps", async () => {
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const result = await executeChain(
+			makeChainParams([{ agent: "analyst", task: "Inspect descriptor" }], [makeAgent("analyst", { exposure: "local" })]),
+		);
+		assert.equal(result.isError, undefined);
+		const env = JSON.parse(result.details.results[0]?.finalOutput ?? "{}");
+		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(descriptor.version, 1);
+		assert.equal(descriptor.requestedExposure, "local");
+		assert.equal(descriptor.intentSource, "agent");
+		assert.ok(!readCallArgs(0).includes("--no-extensions"));
+	});
 
 	it("runs a 2-step chain", async () => {
 		mockPi.onCall({ output: "Analysis complete: found 3 issues" });
