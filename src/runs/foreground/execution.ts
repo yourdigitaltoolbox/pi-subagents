@@ -50,6 +50,7 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { createChildRuntimeIdentity, resolveChildWorkspaceId } from "../shared/child-session-contract.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -228,6 +229,7 @@ async function runSingleAttempt(
 		runId: options.runId,
 		childAgentName: agent.name,
 		childIndex: options.index ?? 0,
+		childIdentity: options.childIdentity,
 		requestedExposure: agent.exposure,
 		parentEventSink: options.nestedRoute?.eventSink,
 		parentControlInbox: options.nestedRoute?.controlInbox,
@@ -1124,6 +1126,10 @@ export async function runSync(
 	}
 
 	const shareEnabled = options.share === true;
+	const childIdentity = options.childIdentity ?? createChildRuntimeIdentity(
+		options.workspaceId ?? resolveChildWorkspaceId(options.cwd ?? runtimeCwd, { parentSessionId: options.parentSessionId }),
+	);
+	const attemptOptions: RunSyncOptions = { ...options, childIdentity };
 	const effectiveAcceptance = resolveEffectiveAcceptance({
 		explicit: options.acceptance,
 		agentName,
@@ -1204,7 +1210,7 @@ export async function runSync(
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
 		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, options, {
+		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, attemptOptions, {
 			sessionEnabled,
 			systemPrompt,
 			resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
@@ -1252,6 +1258,8 @@ export async function runSync(
 		error: "Subagent did not produce a result.",
 	} satisfies SingleResult;
 
+	result.workspaceId = childIdentity.workspaceId;
+	result.agentId = childIdentity.agentId;
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;

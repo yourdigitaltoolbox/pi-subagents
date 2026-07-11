@@ -2,12 +2,14 @@ import type { DynamicParallelStep, ParallelTaskItem } from "../../shared/setting
 import type { ArtifactPaths, ChainOutputMap, JsonSchemaObject, SingleResult } from "../../shared/types.ts";
 import { getSingleResultOutput } from "../../shared/utils.ts";
 import { validateStructuredOutputValue } from "./structured-output.ts";
+import { createChildRuntimeIdentity } from "./child-session-contract.ts";
 
 export class DynamicFanoutError extends Error {}
 
 export interface DynamicFanoutConfig {
 	maxItems?: number;
 	allowRunnerFields?: boolean;
+	workspaceId?: string;
 }
 
 export interface DynamicMaterializedItem {
@@ -51,7 +53,7 @@ const RUNNER_DYNAMIC_PARALLEL_KEYS = new Set([
 	...DYNAMIC_PARALLEL_KEYS,
 	"outputName", "structured", "inheritProjectContext", "inheritSkills", "skills", "outputPath", "maxSubagentDepth",
 	"structuredOutput", "structuredOutputSchema", "tools", "extensions", "subagentOnlyExtensions", "mcpDirectTools", "completionGuard", "systemPrompt",
-	"systemPromptMode", "thinking", "modelCandidates", "sessionFile", "effectiveAcceptance", "parentSessionId",
+	"systemPromptMode", "thinking", "modelCandidates", "sessionFile", "effectiveAcceptance", "parentSessionId", "childIdentity",
 ]);
 const DYNAMIC_COLLECT_KEYS = new Set(["as", "outputSchema"]);
 
@@ -254,6 +256,7 @@ export function materializeDynamicParallelStep(step: DynamicParallelStep, output
 		const label = step.parallel.label ? resolveItemTemplate(step.parallel.label, itemName, entry.item) : undefined;
 		return {
 			...step.parallel,
+			childIdentity: createChildRuntimeIdentity(config.workspaceId),
 			task,
 			...(label !== undefined ? { label } : {}),
 		};

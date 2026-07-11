@@ -17,9 +17,21 @@ import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
 import { resolveModelCandidate, resolveSubagentModelOverride } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
-import type { ChildExposureMode } from "../shared/child-session-contract.ts";
+import {
+	createChildRuntimeIdentity,
+	resolveChildWorkspaceId,
+	validateChildRuntimeIdentity,
+	validateChildWorkspaceId,
+	type ChildExposureMode,
+	type ChildRuntimeIdentity,
+} from "../shared/child-session-contract.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
+import {
+	FOREGROUND_RUN_STATE_FILE,
+	loadForegroundResumeRuns,
+	persistForegroundResumeRuns,
+} from "../shared/foreground-run-state.ts";
 import {
 	buildChainInstructions,
 	writeInitialProgressFile,
@@ -195,6 +207,7 @@ interface ExecutionContextData {
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	agents: AgentConfig[];
 	runId: string;
+	workspaceId: string;
 	shareEnabled: boolean;
 	sessionRoot: string;
 	sessionDirForIndex: (idx?: number) => string;
@@ -335,6 +348,38 @@ function trimRememberedForegroundRuns(state: SubagentState): void {
 	}
 }
 
+function persistRememberedForegroundRuns(state: SubagentState): void {
+	if (!state.foregroundRunStorePath || !state.foregroundRuns) return;
+	persistForegroundResumeRuns(state.foregroundRunStorePath, state.foregroundRuns);
+}
+
+function restoreRememberedForegroundRuns(state: SubagentState, deps: ExecutorDeps, ctx: ExtensionContext): void {
+	let parentSessionFile: string | null;
+	try {
+		parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
+	} catch {
+		// Session diagnostics (notably doctor) intentionally exercise unavailable
+		// managers. Revive-state restoration is best-effort and must not mask the
+		// action's own bounded diagnostic path.
+		return;
+	}
+	if (!parentSessionFile) {
+		// Leaving a persisted parent session must also leave its revive namespace:
+		// otherwise a sessionless parent could resume those children or write new
+		// completions back into the previous parent's ledger. An initially
+		// sessionless executor keeps its historical in-memory behavior.
+		if (typeof state.foregroundRunStorePath === "string") {
+			state.foregroundRuns = new Map();
+			state.foregroundRunStorePath = null;
+		}
+		return;
+	}
+	const storePath = path.join(deps.getSubagentSessionRoot(parentSessionFile), FOREGROUND_RUN_STATE_FILE);
+	if (state.foregroundRunStorePath === storePath) return;
+	state.foregroundRuns = loadForegroundResumeRuns(storePath);
+	state.foregroundRunStorePath = storePath;
+}
+
 function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; results: SingleResult[] }): void {
 	state.foregroundRuns ??= new Map();
 	const previous = state.foregroundRuns.get(input.runId);
@@ -348,6 +393,8 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 			const child = {
 				agent: result.agent,
 				index,
+				...(result.workspaceId ? { workspaceId: result.workspaceId } : {}),
+				...(result.agentId ? { agentId: result.agentId } : {}),
 				status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
 				updatedAt,
 				...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
@@ -366,6 +413,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 		}),
 	});
 	trimRememberedForegroundRuns(state);
+	persistRememberedForegroundRuns(state);
 }
 
 function updateRememberedForegroundChild(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; index: number; result: SingleResult }): void {
@@ -382,6 +430,8 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...child,
 		agent: input.result.agent,
 		index: input.index,
+		...(input.result.workspaceId ? { workspaceId: input.result.workspaceId } : {}),
+		...(input.result.agentId ? { agentId: input.result.agentId } : {}),
 		status: resolveSubagentResultStatus({ exitCode: input.result.exitCode, interrupted: input.result.interrupted, detached: false }),
 		updatedAt,
 		...(input.result.exitCode !== undefined ? { exitCode: input.result.exitCode } : {}),
@@ -396,9 +446,10 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
 	};
 	trimRememberedForegroundRuns(state);
+	persistRememberedForegroundRuns(state);
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; childIdentity: ChildRuntimeIdentity } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size) return undefined;
 	const direct = state.foregroundRuns.get(requested);
@@ -416,7 +467,13 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file: ${child.sessionFile}`);
 	const sessionFile = path.resolve(child.sessionFile);
 	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file does not exist: ${child.sessionFile}`);
-	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile };
+	if ((child.workspaceId === undefined) !== (child.agentId === undefined)) {
+		throw new Error(`Foreground run '${run.runId}' child ${index} has incomplete persisted child identity.`);
+	}
+	const childIdentity = child.workspaceId && child.agentId
+		? validateChildRuntimeIdentity({ workspaceId: child.workspaceId, agentId: child.agentId })
+		: createChildRuntimeIdentity(resolveChildWorkspaceId(run.cwd));
+	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile, childIdentity };
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
@@ -431,6 +488,7 @@ type NestedResumeSourceTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile: string;
+	childIdentity: ChildRuntimeIdentity;
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
@@ -821,7 +879,21 @@ function appendStepToAsyncChain(input: {
 		currentModel: input.ctx.model,
 		modelScope: discoveredForAppend.modelScope,
 	};
+	let workspaceId: string;
+	try {
+		const persistedWorkspaceId = status.workspaceId ?? status.steps?.find((step) => step.workspaceId)?.workspaceId;
+		workspaceId = persistedWorkspaceId
+			? validateChildWorkspaceId(persistedWorkspaceId)
+			: resolveChildWorkspaceId(status.cwd ?? input.requestCwd, { parentSessionId: status.sessionId });
+	} catch (error) {
+		return {
+			content: [{ type: "text", text: `Cannot append step to run '${resolved.id}': ${error instanceof Error ? error.message : String(error)}` }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
 	const built = buildAsyncRunnerSteps(resolved.id, {
+		workspaceId,
 		chain: wrapChainTasksForFork(input.params.chain, contextPolicy),
 		task: input.params.task,
 		resultMode: "chain",
@@ -938,6 +1010,9 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		intercomTarget: resolveSubagentIntercomTarget(run.id, agent, 0),
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
+		childIdentity: run.workspaceId && run.agentId
+			? validateChildRuntimeIdentity({ workspaceId: run.workspaceId, agentId: run.agentId })
+			: createChildRuntimeIdentity(resolveChildWorkspaceId(asyncDir ? path.dirname(asyncDir) : process.cwd())),
 	};
 }
 
@@ -1164,6 +1239,7 @@ async function resumeAsyncRun(input: {
 		const chain = wrapChainTasksForFork(attachChain, contextPolicy);
 		const normalized = normalizeSkillInput(input.params.skill);
 		const result = executeAsyncChain(runId, {
+			workspaceId: target.childIdentity.workspaceId,
 			chain,
 			task: (input.params.task ?? followUp) || undefined,
 			attachRoot: {
@@ -1219,6 +1295,7 @@ async function resumeAsyncRun(input: {
 	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const result = executeAsyncSingle(runId, {
+		workspaceId: target.childIdentity.workspaceId,
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
 		agentConfig,
@@ -1238,6 +1315,7 @@ async function resumeAsyncRun(input: {
 		shareEnabled: input.params.share === true,
 		sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile),
 		sessionFile: target.sessionFile,
+		childIdentity: target.childIdentity,
 		modelOverride: input.params.model ?? target.model,
 		thinkingOverride: input.params.model ? undefined : target.thinking,
 		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
@@ -1912,6 +1990,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
 		}));
 		return executeAsyncChain(id, {
+			workspaceId: data.workspaceId,
 			chain: [{
 				parallel: parallelTasks,
 				concurrency: resolveTopLevelParallelConcurrency(params.concurrency, deps.config.parallel?.concurrency),
@@ -1951,6 +2030,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const chainSkills = normalized === false ? [] : (normalized ?? []);
 		const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy);
 		return executeAsyncChain(id, {
+			workspaceId: data.workspaceId,
 			chain,
 			task: params.task,
 			agents,
@@ -1999,6 +2079,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
 		const modelOverride = resolveSubagentModelOverride((params.model as string | undefined) ?? a.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, source: (params.model as string | undefined) ? "explicit" : "inherited" });
 		return executeAsyncSingle(id, {
+			workspaceId: data.workspaceId,
 			agent: params.agent!,
 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
 			agentConfig: a,
@@ -2072,6 +2153,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		intercomEvents: deps.pi.events,
 		signal,
 		runId,
+		workspaceId: data.workspaceId,
 		cwd: effectiveCwd,
 		shareEnabled,
 		sessionDirForIndex,
@@ -2125,6 +2207,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		};
 		const asyncChain = wrapChainTasksForFork(chainResult.requestedAsync.chain, contextPolicy);
 		return executeAsyncChain(id, {
+			workspaceId: data.workspaceId,
 			chain: asyncChain,
 			task: params.task,
 			agents,
@@ -2194,6 +2277,7 @@ interface ForegroundParallelRunInput {
 	intercomEvents: IntercomEventBus;
 	signal: AbortSignal;
 	runId: string;
+	workspaceId: string;
 	sessionDirForIndex: (idx?: number) => string | undefined;
 	sessionFileForIndex: (idx?: number) => string | undefined;
 	sessionFileForTask: (agentName: string, idx?: number) => string | undefined;
@@ -2381,6 +2465,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 			intercomEvents: input.intercomEvents,
 			runId: input.runId,
+			workspaceId: input.workspaceId,
 			index,
 			sessionDir: input.sessionDirForIndex(index),
 			sessionFile: input.sessionFileForTask(task.agent, index),
@@ -2615,6 +2700,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				};
 			});
 			return executeAsyncChain(id, {
+				workspaceId: data.workspaceId,
 				chain: [{ parallel: parallelTasks, concurrency: parallelConcurrency, worktree: params.worktree }],
 				resultMode: "parallel",
 				agents,
@@ -2695,6 +2781,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			intercomEvents: deps.pi.events,
 			signal,
 			runId,
+			workspaceId: data.workspaceId,
 			sessionDirForIndex,
 			sessionFileForIndex,
 			sessionFileForTask,
@@ -2914,6 +3001,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				modelScope: data.modelScope,
 			};
 			return executeAsyncSingle(id, {
+				workspaceId: data.workspaceId,
 				agent: params.agent!,
 				task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(task) : task,
 				agentConfig,
@@ -3008,6 +3096,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 		intercomEvents: deps.pi.events,
 		runId,
+		workspaceId: data.workspaceId,
 		sessionDir: sessionDirForIndex(0),
 		sessionFile: sessionFileForTask(params.agent!, 0),
 		share: shareEnabled,
@@ -3179,6 +3268,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 	): Promise<AgentToolResult<Details>> => {
 		deps.state.baseCwd = ctx.cwd;
 		deps.state.foregroundRuns ??= new Map();
+		restoreRememberedForegroundRuns(deps.state, deps, ctx);
 		deps.state.foregroundControls ??= new Map();
 		deps.state.lastForegroundControlId ??= null;
 		const requestParams = omitExecutionModeActionAlias(params);
@@ -3465,6 +3555,9 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			: discoveredAgents;
 		const agents = applyRequestedExposure(bridgedAgents, effectiveParams.exposure);
 		const runId = randomUUID().slice(0, 8);
+		const workspaceId = resolveChildWorkspaceId(effectiveCwd, {
+			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
+		});
 		const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 		const nestedParentAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;
 		const nestedRoute = inheritedNestedRoute ?? createNestedRoute(runId);
@@ -3565,6 +3658,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			onUpdate: onUpdateWithContext,
 			agents,
 			runId,
+			workspaceId,
 			shareEnabled,
 			sessionRoot,
 			sessionDirForIndex,

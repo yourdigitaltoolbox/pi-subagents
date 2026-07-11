@@ -866,6 +866,10 @@ describe("buildPiArgs system prompt mode wiring", () => {
 	});
 
 	it("emits a v1 child descriptor without suppressing inherited extensions", () => {
+		const childIdentity = {
+			workspaceId: "11111111-1111-4111-8111-111111111111",
+			agentId: "22222222-2222-4222-8222-222222222222",
+		};
 		const first = buildPiArgs({
 			baseArgs: ["-p"],
 			task: "hello",
@@ -875,6 +879,7 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			runId: "descriptor-run",
 			childAgentName: "reviewer",
 			childIndex: 3,
+			childIdentity,
 			parentSessionId: "parent-session",
 			requestedExposure: "relay",
 			remotePiCompatibility: { state: "absent" },
@@ -888,6 +893,7 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			runId: "descriptor-run",
 			childAgentName: "reviewer",
 			childIndex: 3,
+			childIdentity,
 			requestedExposure: "relay",
 			remotePiCompatibility: { state: "absent" },
 		});
@@ -899,6 +905,8 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(descriptor.requestedExposure, "relay");
 		assert.equal(descriptor.parentSessionId, "parent-session");
 		assert.equal(descriptor.index, 3);
+		assert.equal(descriptor.workspaceId, childIdentity.workspaceId);
+		assert.equal(descriptor.agentId, childIdentity.agentId);
 		assert.equal(descriptor.agentId, nextDescriptor.agentId);
 		assert.notEqual(descriptor.processEpoch, nextDescriptor.processEpoch);
 		assert.equal(descriptor.compatibility.remotePi.state, "absent");

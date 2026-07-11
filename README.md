@@ -304,7 +304,16 @@ Packaged `planner`, `worker`, and `oracle` default to forked context when a laun
 
 Child-safety boundaries are enforced at runtime. Spawned child sessions do not receive the bundled `pi-subagents` skill, and forked child context filtering removes parent-only subagent artifacts (including old hidden orchestration-instruction messages, slash/status/control messages, and prior parent `subagent` tool-call/tool-result history) while preserving ordinary prose and unrelated tool calls/results. By default, children do not register the `subagent` tool and receive boundary instructions that they are not the parent orchestrator and must not propose or run subagents. The explicit exception is an agent whose resolved builtin `tools` includes `subagent`; that child gets a child-safe `subagent` tool for the fanout work the parent assigned, still bounded by `maxSubagentDepth`.
 
-Every tracked child launch also carries the versioned, non-secret `PI_SUBAGENT_DESCRIPTOR` contract. Its exposure value is a request, not relay authorization: explicit run `exposure` overrides agent frontmatter, then the built-in default is `local`. When remote-pi is absent, launches continue normally. When remote-pi is configured or resolvable, pi-subagents reads its package protocol metadata immediately before returning spawn arguments and blocks an old, malformed, unresolved, or incompatible pairing before child Pi wakes. This policy never changes extension selection: omitted `extensions` still means normal Pi extension inheritance, and exposure handling never injects `--no-extensions`.
+Every tracked child launch also carries the versioned, non-secret `PI_SUBAGENT_DESCRIPTOR` contract. Fresh siblings share one protected/inherited `workspaceId`, each logical child receives its own `agentId`, resume retains those IDs, and every process attempt rotates `processEpoch`; these are correlation fields, not credentials. Its exposure value is a request, not relay authorization: explicit run `exposure` overrides agent frontmatter, then the built-in default is `local`. When remote-pi is absent, launches continue normally. When remote-pi is configured or resolvable, pi-subagents reads its package protocol metadata immediately before returning spawn arguments and blocks an old, malformed, unresolved, or incompatible pairing before child Pi wakes. This policy never changes extension selection: omitted `extensions` still means normal Pi extension inheritance, and exposure handling never injects `--no-extensions`.
+
+When workspace correlation comes from remote-pi's cwd config, pi-subagents
+requires the versioned schema, private ownership/modes, safe fields, and
+no-follow opened-file validation; rejected bytes fall back to parent-session
+correlation instead of becoming trusted identity. As with remote-pi's own cwd
+config, portable Node does not claim protection against a malicious process
+already running as the same OS user and racing path components between
+syscalls. That local-user compromise boundary cannot grant authority through
+these non-secret IDs.
 
 ## Optional shortcuts
 

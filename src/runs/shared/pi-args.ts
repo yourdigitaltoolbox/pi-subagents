@@ -14,6 +14,7 @@ import {
 	encodeChildSessionDescriptor,
 	loadPiSubagentsPackageIdentity,
 	type ChildExposureMode,
+	type ChildRuntimeIdentity,
 } from "./child-session-contract.ts";
 import { preflightRemotePiCompatibility, type RemotePiCompatibility } from "./remote-pi-compat.ts";
 
@@ -65,6 +66,7 @@ interface BuildPiArgsInput {
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
+	childIdentity?: ChildRuntimeIdentity;
 	parentAgentId?: string;
 	requestedExposure?: ChildExposureMode;
 	/** Optional tested compatibility result; production launches preflight when omitted. */
@@ -210,6 +212,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 			runId: input.runId,
 			childAgentName: input.childAgentName,
 			childIndex: input.childIndex ?? 0,
+			identity: input.childIdentity,
 			parentSessionId: input.parentSessionId,
 			parentAgentId: input.parentAgentId ?? inheritedParentAgentId(),
 			requestedExposure: input.requestedExposure,

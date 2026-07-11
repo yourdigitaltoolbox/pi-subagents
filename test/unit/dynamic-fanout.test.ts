@@ -29,10 +29,13 @@ describe("dynamic fanout helpers", () => {
 			parallel: { agent: "reviewer", task: "Review {target.path}", label: "Review {target.path}" },
 			collect: { as: "reviews" },
 		};
-		const materialized = materializeDynamicParallelStep(step, outputs, 1);
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const materialized = materializeDynamicParallelStep(step, outputs, 1, { workspaceId });
 		assert.deepEqual(materialized.items.map((item) => item.key), ["src/a.ts", "src/b.ts"]);
 		assert.deepEqual(materialized.parallel.map((task) => task.task), ["Review src/a.ts", "Review src/b.ts"]);
 		assert.deepEqual(materialized.parallel.map((task) => task.label), ["Review src/a.ts", "Review src/b.ts"]);
+		assert.deepEqual(new Set(materialized.parallel.map((task) => task.childIdentity?.workspaceId)), new Set([workspaceId]));
+		assert.equal(new Set(materialized.parallel.map((task) => task.childIdentity?.agentId)).size, 2);
 	});
 
 	it("rejects missing structured sources, over-limit arrays, duplicate keys, colliding ids, and bad templates", () => {

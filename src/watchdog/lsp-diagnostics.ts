@@ -260,6 +260,7 @@ class JsonRpcLspClient {
 	private readonly child: ChildProcessWithoutNullStreams;
 	private stderr = "";
 	private exited = false;
+	private transportFailed = false;
 	private readonly exitWaiters: Array<() => void> = [];
 
 	constructor(child: ChildProcessWithoutNullStreams) {
@@ -268,13 +269,16 @@ class JsonRpcLspClient {
 		child.stderr.on("data", (chunk: Buffer) => {
 			this.stderr = `${this.stderr}${chunk.toString("utf-8")}`.slice(-MAX_STDERR_LENGTH);
 		});
+		child.stdin.on("error", (error) => this.failTransport(error));
 		child.on("error", (error) => {
 			this.exited = true;
+			this.transportFailed = true;
 			this.rejectPending(error);
 			this.resolveExitWaiters();
 		});
 		child.on("exit", (code, signal) => {
 			this.exited = true;
+			this.transportFailed = true;
 			this.rejectPending(new Error(`language server exited${code === null ? "" : ` with code ${code}`}${signal ? ` signal ${signal}` : ""}`));
 			this.resolveExitWaiters();
 		});
@@ -284,7 +288,12 @@ class JsonRpcLspClient {
 		const id = this.nextId++;
 		const promise = new Promise<unknown>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
-			this.send({ jsonrpc: "2.0", id, method, params });
+			try {
+				this.send({ jsonrpc: "2.0", id, method, params });
+			} catch (error) {
+				this.pending.delete(id);
+				reject(error);
+			}
 		});
 		return withTimeout(promise, timeoutMs, `${method} timed out`, signal);
 	}
@@ -295,12 +304,20 @@ class JsonRpcLspClient {
 
 	async shutdown(): Promise<void> {
 		if (this.exited) return;
-		try {
-			await this.request("shutdown", null, SHUTDOWN_TIMEOUT_MS);
-			this.notify("exit", null);
-		} catch {
+		if (!this.transportFailed) {
+			try {
+				await this.request("shutdown", null, SHUTDOWN_TIMEOUT_MS);
+				this.notify("exit", null);
+			} catch {
+				this.child.kill("SIGTERM");
+			}
+		} else {
 			this.child.kill("SIGTERM");
 		}
+		if (await this.waitForExit(SHUTDOWN_TIMEOUT_MS)) return;
+		// A malformed or wedged server may ignore SIGTERM. Do not leak it after
+		// the bounded diagnostic attempt; force termination and reap the exit.
+		this.child.kill("SIGKILL");
 		await this.waitForExit(SHUTDOWN_TIMEOUT_MS);
 	}
 
@@ -313,7 +330,7 @@ class JsonRpcLspClient {
 	}
 
 	private send(payload: JsonRpcMessage): void {
-		if (this.exited) throw new Error("language server already exited");
+		if (this.exited || this.transportFailed) throw new Error("language server transport is closed");
 		const body = JSON.stringify(payload);
 		this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
 	}
@@ -365,19 +382,29 @@ class JsonRpcLspClient {
 	}
 
 	private failProtocol(error: Error): void {
-		if (this.exited) return;
+		this.failTransport(error);
+	}
+
+	private failTransport(error: Error): void {
+		if (this.exited || this.transportFailed) return;
+		this.transportFailed = true;
 		this.rejectPending(error);
 		this.child.kill("SIGTERM");
 	}
 
-	private waitForExit(timeoutMs: number): Promise<void> {
-		if (this.exited) return Promise.resolve();
+	private waitForExit(timeoutMs: number): Promise<boolean> {
+		if (this.exited) return Promise.resolve(true);
 		return new Promise((resolve) => {
-			const timer = setTimeout(resolve, timeoutMs);
-			this.exitWaiters.push(() => {
+			const onExit = () => {
 				clearTimeout(timer);
-				resolve();
-			});
+				resolve(true);
+			};
+			const timer = setTimeout(() => {
+				const index = this.exitWaiters.indexOf(onExit);
+				if (index >= 0) this.exitWaiters.splice(index, 1);
+				resolve(this.exited);
+			}, timeoutMs);
+			this.exitWaiters.push(onExit);
 		});
 	}
 

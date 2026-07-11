@@ -131,6 +131,10 @@ export function consumeChainAppendRequests(asyncDir: string): ChainAppendRequest
 function statusStepForTask(task: RunnerSubagentStep): StatusStep {
 	return {
 		agent: task.agent,
+		...(task.childIdentity ? {
+			workspaceId: task.childIdentity.workspaceId,
+			agentId: task.childIdentity.agentId,
+		} : {}),
 		phase: task.phase,
 		label: task.label,
 		outputName: task.outputName,

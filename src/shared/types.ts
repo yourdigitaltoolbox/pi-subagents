@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { ChildRuntimeIdentity } from "../runs/shared/child-session-contract.ts";
 
 // ============================================================================
 // Basic Types
@@ -472,6 +473,8 @@ export interface AcceptanceLedger {
 export interface SingleResult {
 	agent: string;
 	task: string;
+	workspaceId?: string;
+	agentId?: string;
 	exitCode: number;
 	detached?: boolean;
 	detachedReason?: string;
@@ -597,6 +600,8 @@ export interface NestedRunAddress {
 
 export interface NestedStepSummary {
 	agent: string;
+	workspaceId?: string;
+	agentId?: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped";
 	sessionFile?: string;
 	transcriptPath?: string;
@@ -623,6 +628,8 @@ export interface NestedStepSummary {
 }
 
 export interface NestedRunSummary extends NestedRunAddress {
+	workspaceId?: string;
+	agentId?: string;
 	asyncDir?: string;
 	pid?: number;
 	sessionId?: string;
@@ -695,6 +702,8 @@ export interface AsyncStartedEvent {
 export interface AsyncStatus {
 	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	runId: string;
+	/** Shared workspace correlation for every child materialized by this run. */
+	workspaceId?: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
@@ -729,6 +738,8 @@ export interface AsyncStatus {
 	workflowGraph?: WorkflowGraphSnapshot;
 	steps?: Array<{
 		agent: string;
+		workspaceId?: string;
+		agentId?: string;
 		phase?: string;
 		label?: string;
 		outputName?: string;
@@ -836,6 +847,8 @@ export interface AsyncJobState {
 export interface ForegroundResumeChild {
 	agent: string;
 	index: number;
+	workspaceId?: string;
+	agentId?: string;
 	sessionFile?: string;
 	status: SubagentResultStatus;
 	exitCode?: number;
@@ -865,6 +878,9 @@ export interface SubagentState {
 	subagentSpawns?: { sessionId: string | null; count: number };
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
+	/** Parent-session-scoped durable ledger currently loaded into foregroundRuns.
+	 *  null marks an explicit transition to a session without persistent state. */
+	foregroundRunStorePath?: string | null;
 	foregroundControls: Map<string, {
 		runId: string;
 		mode: SubagentRunMode;
@@ -957,6 +973,9 @@ export interface RunSyncOptions {
 	artifactsDir?: string;
 	artifactConfig?: ArtifactConfig;
 	runId: string;
+	/** Shared workspace correlation for fresh children; ignored when childIdentity is retained. */
+	workspaceId?: string;
+	childIdentity?: ChildRuntimeIdentity;
 	index?: number;
 	sessionDir?: string;
 	sessionFile?: string;

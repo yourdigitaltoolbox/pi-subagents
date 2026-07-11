@@ -1,10 +1,11 @@
-import type { ChildExposureMode } from "./child-session-contract.ts";
+import type { ChildExposureMode, ChildRuntimeIdentity } from "./child-session-contract.ts";
 
 export interface RunnerSubagentStep {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
 	agent: string;
 	task: string;
+	childIdentity?: ChildRuntimeIdentity;
 	importAsyncRoot?: {
 		runId: string;
 		asyncDir: string;

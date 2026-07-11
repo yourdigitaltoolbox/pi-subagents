@@ -285,7 +285,11 @@ async function main() {
 	writeSessionFile(args);
 	fs.writeFileSync(
 		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
-		JSON.stringify({ args, systemPrompts: readSystemPromptRecords(args) }),
+		JSON.stringify({
+			args,
+			systemPrompts: readSystemPromptRecords(args),
+			childDescriptor: process.env.PI_SUBAGENT_DESCRIPTOR ?? null,
+		}),
 		"utf-8",
 	);
 

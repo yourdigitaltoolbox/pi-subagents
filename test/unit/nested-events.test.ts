@@ -11,6 +11,7 @@ import {
 	projectNestedEvents,
 	resolveNestedParentAddressFromEnv,
 	resolveNestedRouteFromEnv,
+	sanitizeSummary,
 	updateAsyncJobNestedProjection,
 	updateForegroundNestedProjection,
 	writeNestedEvent,
@@ -70,6 +71,23 @@ function child(id: string, state: "queued" | "running" | "complete" | "failed" |
 		steps: [{ agent: "leaf", status: state === "running" ? "running" as const : "complete" as const }],
 	};
 }
+
+describe("nested runtime identity projection", () => {
+	it("preserves only complete valid workspace/agent identity pairs", () => {
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const agentId = "22222222-2222-4222-8222-222222222222";
+		const summary = sanitizeSummary({
+			...child("identity-child", "complete", 20),
+			workspaceId,
+			agentId,
+			steps: [{ agent: "leaf", status: "complete", workspaceId, agentId }],
+		});
+		assert.equal(summary?.workspaceId, workspaceId);
+		assert.equal(summary?.agentId, agentId);
+		assert.equal(summary?.steps?.[0]?.workspaceId, workspaceId);
+		assert.equal(sanitizeSummary({ ...child("partial-child", "complete", 20), workspaceId })?.workspaceId, undefined);
+	});
+});
 
 describe("nested route index", () => {
 	it("indexes routes by root run id in a single directory scan", () => {

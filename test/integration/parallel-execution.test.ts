@@ -197,15 +197,23 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		const executor = makeExecutor([makeAgent("echo", { exposure: "relay" })]);
 		const result = await executor.execute(
 			"parallel-descriptor",
-			{ tasks: [{ agent: "echo", task: "Inspect descriptor" }], exposure: "local" },
+			{ tasks: [
+				{ agent: "echo", task: "Inspect descriptor one" },
+				{ agent: "echo", task: "Inspect descriptor two" },
+			], exposure: "local" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 		assert.equal(result.isError, undefined);
-		const env = JSON.parse(result.details?.results?.[0]?.finalOutput ?? "{}");
-		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
-		assert.equal(descriptor.requestedExposure, "local");
+		const descriptors = (result.details?.results ?? []).map((child) => {
+			const env = JSON.parse(child.finalOutput ?? "{}");
+			return JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		});
+		assert.equal(descriptors.length, 2);
+		assert.equal(descriptors[0].requestedExposure, "local");
+		assert.equal(descriptors[0].workspaceId, descriptors[1].workspaceId);
+		assert.notEqual(descriptors[0].agentId, descriptors[1].agentId);
 		assert.ok(!readLastCallArgs().includes("--no-extensions"));
 	});
 

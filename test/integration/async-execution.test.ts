@@ -42,13 +42,14 @@ interface AsyncResultPayload {
 	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-	results: Array<{ output?: string; success?: boolean; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	results: Array<{ workspaceId?: string; agentId?: string; output?: string; success?: boolean; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
 
 interface AsyncStatusPayload {
 	lifecycleArtifactVersion?: number;
+	workspaceId?: string;
 	sessionId?: string;
 	activityState?: string;
 	currentTool?: string;
@@ -65,6 +66,8 @@ interface AsyncStatusPayload {
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	parallelGroups?: Array<{ start: number; count: number; stepIndex: number }>;
 	steps?: Array<{
+		workspaceId?: string;
+		agentId?: string;
 		label?: string;
 		phase?: string;
 		outputName?: string;
@@ -377,6 +380,64 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(descriptor.requestedExposure, "off");
 		const args = await waitForMockPiArgs(mockPi, 0);
 		assert.ok(!args.includes("--no-extensions"));
+	});
+
+	it("preserves the run workspace identity through management append requests", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 1_000, output: "initial step done" });
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const id = `async-append-identity-${Date.now().toString(36)}`;
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const launched = executeAsyncChain(id, {
+			workspaceId,
+			chain: [{ agent: "initial", task: "Keep the chain active briefly" }],
+			agents: [makeAgent("initial"), makeAgent("appended", { exposure: "off" })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-append-parent" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+		assert.equal(launched.isError, undefined);
+		await waitForMockPiCall(mockPi, 0, 10_000);
+
+		const executor = createSubagentExecutor!({
+			pi: { events: createEventBus(), getSessionName: () => undefined },
+			state: { baseCwd: tempDir, currentSessionId: "session-append-parent", asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+			config: {},
+			asyncByDefault: false,
+			tempArtifactsDir: tempDir,
+			getSubagentSessionRoot: () => tempDir,
+			expandTilde: (p: string) => p,
+			discoverAgents: () => ({ agents: [makeAgent("initial"), makeAgent("appended", { exposure: "off" })] }),
+		});
+		const appendResult = await executor.execute(
+			"append-step-identity",
+			{ action: "append-step", id, chain: [{ agent: "appended", task: "Report the appended descriptor" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(appendResult.isError, undefined, JSON.stringify(appendResult.content));
+		assert.match(appendResult.content[0]?.text ?? "", /Append queued/);
+
+		const resultPath = await waitForAsyncResultFile(id, 15_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true);
+		assert.equal(status.steps?.length, 2);
+		assert.equal(status.workspaceId, workspaceId);
+		assert.equal(status.steps?.[1]?.workspaceId, status.workspaceId);
+		assert.equal(payload.results[1]?.workspaceId, status.workspaceId);
+		assert.match(status.steps?.[1]?.agentId ?? "", /^[0-9a-f-]{36}$/);
+		assert.equal(payload.results[1]?.agentId, status.steps?.[1]?.agentId);
+		assert.notEqual(status.steps?.[1]?.agentId, status.steps?.[0]?.agentId);
+
+		const descriptorEnv = JSON.parse(payload.results[1]?.output ?? "{}") as Record<string, string>;
+		const descriptor = JSON.parse(descriptorEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+		assert.equal(descriptor.workspaceId, status.workspaceId);
+		assert.equal(descriptor.agentId, status.steps?.[1]?.agentId);
+		assert.match(descriptor.processEpoch ?? "", /^[0-9a-f-]{36}$/);
+		const appendedArgs = await waitForMockPiArgs(mockPi, 1);
+		assert.ok(!appendedArgs.includes("--no-extensions"));
 	});
 
 	it("spawns the async runner with node when process.execPath is not node", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -820,6 +881,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.equal(payload.sessionId, "session-123");
 			assert.equal(payload.results[0]?.acceptance?.status, "checked");
 			assert.equal(status.sessionId, "session-123");
+			assert.match(status.workspaceId ?? "", /^[0-9a-f-]{36}$/);
+			assert.equal(status.steps?.[0]?.workspaceId, status.workspaceId);
+			assert.equal(payload.results[0]?.workspaceId, status.workspaceId);
 			assert.equal(status.steps?.[0]?.acceptance?.status, "checked");
 		const outputPath = path.join(tempDir, ".pi-subagents", "artifacts", "outputs", asyncId, "async-top-output.md");
 		const outputDeadline = Date.now() + 5_000;

@@ -107,6 +107,7 @@ import {
 interface SubagentRunConfig {
 	id: string;
 	steps: RunnerStep[];
+	workspaceId?: string;
 	resultPath: string;
 	cwd: string;
 	placeholder: string;
@@ -143,6 +144,8 @@ interface SubagentRunConfig {
 interface StepResult {
 	agent: string;
 	output: string;
+	workspaceId?: string;
+	agentId?: string;
 	error?: string;
 	success: boolean;
 	exitCode?: number | null;
@@ -1076,6 +1079,7 @@ async function runSingleStep(
 			runId: ctx.id,
 			childAgentName: step.agent,
 			childIndex: ctx.flatIndex,
+			childIdentity: step.childIdentity,
 			parentEventSink: ctx.nestedRoute?.eventSink,
 			parentControlInbox: ctx.nestedRoute?.controlInbox,
 			parentRootRunId: ctx.nestedRoute?.rootRunId,
@@ -1278,6 +1282,7 @@ async function runSingleStep(
 	return {
 		agent: step.agent,
 		output: outputForSummary,
+		...(step.childIdentity ? { workspaceId: step.childIdentity.workspaceId, agentId: step.childIdentity.agentId } : {}),
 		exitCode: effectiveFinalExitCode,
 		error: effectiveFinalError,
 		sessionFile: step.sessionFile,
@@ -1513,6 +1518,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: task.agent, flatIndex: taskFlatIndex, flatStepCount: initialFlatStepCount });
 				initialStatusSteps.push({
 					agent: task.agent,
+					...(task.childIdentity ? { workspaceId: task.childIdentity.workspaceId, agentId: task.childIdentity.agentId } : {}),
 					phase: task.phase,
 					label: task.label,
 					outputName: task.outputName,
@@ -1549,6 +1555,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: step.agent, flatIndex: stepFlatIndex, flatStepCount: initialFlatStepCount });
 			initialStatusSteps.push({
 				agent: step.agent,
+				...(step.childIdentity ? { workspaceId: step.childIdentity.workspaceId, agentId: step.childIdentity.agentId } : {}),
 				phase: step.phase,
 				label: step.label,
 				outputName: step.outputName,
@@ -1573,6 +1580,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const statusPayload: RunnerStatusPayload = {
 		lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 		runId: id,
+		...(config.workspaceId ? { workspaceId: config.workspaceId } : {}),
 		...(config.sessionId ? { sessionId: config.sessionId } : {}),
 		mode: config.resultMode ?? (flatSteps.length > 1 ? "chain" : "single"),
 		state: "running",
@@ -2364,7 +2372,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			const groupStartFlatIndex = flatIndex;
 			let materialized: ReturnType<typeof materializeDynamicParallelStep>;
 			try {
-				materialized = materializeDynamicParallelStep(step as Parameters<typeof materializeDynamicParallelStep>[0], outputs, stepIndex, { maxItems: config.dynamicFanoutMaxItems, allowRunnerFields: true });
+				materialized = materializeDynamicParallelStep(step as Parameters<typeof materializeDynamicParallelStep>[0], outputs, stepIndex, { maxItems: config.dynamicFanoutMaxItems, allowRunnerFields: true, workspaceId: config.workspaceId });
 				if (materialized.collectedOnEmpty) validateDynamicCollection(step.collect.outputSchema, materialized.collectedOnEmpty);
 			} catch (error) {
 				const now = Date.now();
@@ -2472,6 +2480,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: task.agent, flatIndex: groupStartFlatIndex + itemIndex, flatStepCount: dynamicFlatStepCount });
 				return {
 					agent: task.agent,
+					...(task.childIdentity ? { workspaceId: task.childIdentity.workspaceId, agentId: task.childIdentity.agentId } : {}),
 					phase: task.phase ?? step.phase,
 					label: task.label,
 					outputName: undefined,
@@ -2637,6 +2646,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			for (const pr of parallelResults) {
 				results.push({
 					agent: pr.agent,
+					...(pr.workspaceId ? { workspaceId: pr.workspaceId } : {}),
+					...(pr.agentId ? { agentId: pr.agentId } : {}),
 					output: pr.output,
 					error: pr.error,
 					success: pr.stopped !== true && pr.interrupted !== true && pr.exitCode === 0,
@@ -2978,6 +2989,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				for (const pr of parallelResults) {
 					results.push({
 						agent: pr.agent,
+						...(pr.workspaceId ? { workspaceId: pr.workspaceId } : {}),
+						...(pr.agentId ? { agentId: pr.agentId } : {}),
 						output: pr.output,
 						error: pr.error,
 						success: pr.stopped !== true && pr.interrupted !== true && pr.exitCode === 0,
@@ -3102,6 +3115,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			const childStopped = singleResult.stopped === true;
 			results.push({
 				agent: singleResult.agent,
+				...(singleResult.workspaceId ? { workspaceId: singleResult.workspaceId } : {}),
+				...(singleResult.agentId ? { agentId: singleResult.agentId } : {}),
 				output: stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.output,
 				error: stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error,
 				success: !stopped && !childStopped && !timedOut && singleResult.interrupted !== true && singleResult.exitCode === 0,
@@ -3374,6 +3389,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			...(stopped ? { stopped: true, error: stopMessage } : timedOut ? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." } : turnBudgetExceeded ? { error: statusPayload.error ?? "Subagent exceeded turn budget." } : {}),
 			results: results.map((r) => ({
 				agent: r.agent,
+				...(r.workspaceId ? { workspaceId: r.workspaceId } : {}),
+				...(r.agentId ? { agentId: r.agentId } : {}),
 				output: r.output,
 				error: r.error,
 				success: r.success,

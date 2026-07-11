@@ -92,6 +92,29 @@ describe("async runner execution", () => {
 		}
 	});
 
+	it("shares one workspaceId across children while allocating distinct agentIds", () => {
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const result = buildAsyncRunnerSteps("run-identity", {
+			workspaceId,
+			chain: [
+				{ agent: "worker", task: "one" },
+				{ parallel: [{ agent: "worker", task: "two" }, { agent: "worker", task: "three" }] },
+			],
+			agents: [agent("worker")],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-async-test"),
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok("steps" in result, "expected successful step build");
+		const identities = result.steps.flatMap((step) => "parallel" in step && Array.isArray(step.parallel)
+			? step.parallel.map((child) => child.childIdentity)
+			: [step.childIdentity]);
+		assert.equal(identities.length, 3);
+		assert.deepEqual(new Set(identities.map((identity) => identity?.workspaceId)), new Set([workspaceId]));
+		assert.equal(new Set(identities.map((identity) => identity?.agentId)).size, 3);
+	});
+
 	it("uses config default when no step, run, or agent budget exists", () => {
 		const result = buildAsyncRunnerSteps("run-3", {
 			chain: [{ agent: "worker", task: "config default" }],

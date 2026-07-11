@@ -176,7 +176,13 @@ describe("chain append requests", () => {
 			},
 		};
 		const appended: RunnerStep[] = [
-			runnerStep("worker"),
+			{
+				...runnerStep("worker"),
+				childIdentity: {
+					workspaceId: "11111111-1111-4111-8111-111111111111",
+					agentId: "22222222-2222-4222-8222-222222222222",
+				},
+			},
 			{
 				parallel: [
 					runnerStep("reviewer"),
@@ -199,6 +205,8 @@ describe("chain append requests", () => {
 			"auditor:pending",
 		]);
 		assert.deepEqual(status.parallelGroups, [{ start: 2, count: 2, stepIndex: 2 }]);
+		assert.equal(status.steps?.[1]?.workspaceId, "11111111-1111-4111-8111-111111111111");
+		assert.equal(status.steps?.[1]?.agentId, "22222222-2222-4222-8222-222222222222");
 		assert.equal(status.workflowGraph?.nodes[1]?.id, "step-1");
 		assert.equal(status.workflowGraph?.nodes[2]?.kind, "parallel-group");
 		assert.deepEqual(status.workflowGraph?.nodes[2]?.children?.map((child) => child.flatIndex), [2, 3]);

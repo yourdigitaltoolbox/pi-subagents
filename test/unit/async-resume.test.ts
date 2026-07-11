@@ -42,6 +42,50 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("retains a complete persisted child identity and rejects partial identity", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-identity-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "session.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			const statusPath = path.join(asyncRoot, "run-identity", "status.json");
+			writeJson(statusPath, {
+				runId: "run-identity",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				cwd: root,
+				steps: [{
+					agent: "worker",
+					status: "complete",
+					sessionFile,
+					workspaceId: "11111111-1111-4111-8111-111111111111",
+					agentId: "22222222-2222-4222-8222-222222222222",
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-identity" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.deepEqual(target.childIdentity, {
+				workspaceId: "11111111-1111-4111-8111-111111111111",
+				agentId: "22222222-2222-4222-8222-222222222222",
+			});
+
+			writeJson(statusPath, {
+				runId: "run-identity",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "complete", sessionFile, workspaceId: "11111111-1111-4111-8111-111111111111" }],
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-identity" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/incomplete child identity/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects stopped runs instead of reviving them", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-stopped-"));
 		try {
