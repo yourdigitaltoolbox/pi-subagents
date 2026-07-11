@@ -2,16 +2,25 @@
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-07-11
+
 ### Added
+- Added a versioned, non-authoritative child-session descriptor with stable workspace/logical-agent identity, fresh process epochs, explicit exposure intent/source, and exact package compatibility diagnostics.
+- Added explicit per-run and per-agent relay exposure policy plus bounded parent/runner delegation for foreground, async, resume, append, nested, and dynamically fanned-out child lifecycles.
 - Added single-agent launch defaults for `async`, `timeoutMs`, and `turnBudget` in agent frontmatter, with explicit tool-call values taking precedence. Thanks to ConjugativeIndicator (@CovetingEpiphany2152) for #410.
 - Added `/subagents-stop` and `subagent({ action: "stop", id })` for current-session top-level async runs. The slash command opens a confirmation selector when no id is provided, falls back to exact commands without a TUI, routes scheduled jobs through `schedule-cancel`, and records manual stops as `stopped`/cancelled lifecycle events instead of timeouts. Thanks to Sean Seaman (@seans-leadsonline) for #407 and #408.
 - Added an opt-in read-only subagent watchdog that reviews actual repo edits at safe agent-end boundaries, with visible warnings, main and child watchdog coordination, strong complementary model recommendations, changed-file TypeScript/JavaScript LSP diagnostics, `/subagents-watchdog` status/model commands, and agent-facing watchdog configuration actions. Thanks to can1357/oh-my-pi for the advisor/watchdog concept, and to apmantza/pi-lens, gjczone/pi-shazam, and can1357/oh-my-pi for LSP diagnostics patterns.
 
 ### Changed
+- Child sessions now remain local-only by default while preserving ordinary Pi extension inheritance; run → agent → protected fallback → built-in local precedence is explicit and source-fenced.
+- Durable async state retains only non-secret exposure intent and stable logical identity; process authority is reacquired and epochs rotate on resume.
 - Updated the bundled `pi-subagents` skill so Fable mode is the default orchestration posture for complex work, and refreshed recent command/config guidance.
 - Documented `contact_supervisor` structured interview requests in the default child bridge instructions.
 
 ### Fixed
+- Propagated complete child identity through every spawn/status/result/append/revive path and rejected partial or conflicting persisted intent fail closed.
+- Scrubbed relay capabilities and detached-runner authority from child environments and excluded bearer material from durable status, results, artifacts, events, and logs.
+- Reconciled normal close, interrupt, timeout, runner loss, withdrawal, expiry, and stale process epochs without granting generic relay metadata any external control-plane authority.
 - Hide lower-priority agent definitions from `subagent({ action: "list" })` when a higher-priority project or user agent shadows them. Thanks to Kylegl (@kylegl) for #415.
 - Resolve the real Pi CLI on Windows when pi-subagents runs inside an embedded SDK host instead of relaunching the host application's entry point. Thanks to Marc Kassubeck (@CompN3rd) for #413.
 - Avoid rendering active subagent activity as `now ago`. Thanks to Viktor Chernodub (@chernodub) for #414.
