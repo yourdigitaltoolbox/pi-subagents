@@ -17,6 +17,12 @@ import {
 	type ChildRuntimeIdentity,
 } from "./child-session-contract.ts";
 import { preflightRemotePiCompatibility, type RemotePiCompatibility } from "./remote-pi-compat.ts";
+import {
+	isRelayExposureCapability,
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_RUNNER_DELEGATION_ENV,
+	RELAY_RUNNER_SOCKET_ENV,
+} from "./relay-exposure.ts";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const TASK_ARG_LIMIT = 8000;
@@ -67,8 +73,10 @@ interface BuildPiArgsInput {
 	childAgentName?: string;
 	childIndex?: number;
 	childIdentity?: ChildRuntimeIdentity;
+	childProcessEpoch?: string;
 	parentAgentId?: string;
 	requestedExposure?: ChildExposureMode;
+	relayExposureCapability?: string;
 	/** Optional tested compatibility result; production launches preflight when omitted. */
 	remotePiCompatibility?: RemotePiCompatibility;
 	parentEventSink?: string;
@@ -213,6 +221,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 			childAgentName: input.childAgentName,
 			childIndex: input.childIndex ?? 0,
 			identity: input.childIdentity,
+			processEpoch: input.childProcessEpoch,
 			parentSessionId: input.parentSessionId,
 			parentAgentId: input.parentAgentId ?? inheritedParentAgentId(),
 			requestedExposure: input.requestedExposure,
@@ -221,6 +230,17 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		});
 		env[CHILD_SESSION_DESCRIPTOR_ENV] = encodeChildSessionDescriptor(descriptor);
 	}
+	if (input.relayExposureCapability !== undefined && !isRelayExposureCapability(input.relayExposureCapability)) {
+		throw new Error("Relay exposure capability has an invalid format.");
+	}
+	// Always override inherited process state. A promoted child must never pass
+	// its own one-process bearer capability into a nested or replacement child.
+	env[RELAY_EXPOSURE_CAPABILITY_ENV] = input.relayExposureCapability ?? "";
+	// Runner subdelegation belongs only to the trusted detached runner process.
+	// Every Pi child — including fanout and replacement processes — explicitly
+	// scrubs both the bearer and its local IPC address from inherited state.
+	env[RELAY_RUNNER_DELEGATION_ENV] = "";
+	env[RELAY_RUNNER_SOCKET_ENV] = "";
 	env[SUBAGENT_FANOUT_CHILD_ENV] = fanoutAuthorized ? "1" : "0";
 	const inheritedNestedRoute = Boolean(process.env[SUBAGENT_PARENT_EVENT_SINK_ENV] && process.env[SUBAGENT_PARENT_ROOT_RUN_ID_ENV] && process.env[SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV]);
 	const parentRunId = input.parentRunId ?? input.runId ?? (inheritedNestedRoute ? process.env[SUBAGENT_RUN_ID_ENV] : undefined) ?? process.env[SUBAGENT_PARENT_RUN_ID_ENV] ?? "";

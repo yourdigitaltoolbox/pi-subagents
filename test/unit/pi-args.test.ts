@@ -8,6 +8,11 @@ import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV } from "../../src/watchdog/child-status.ts";
 import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 import {
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_RUNNER_DELEGATION_ENV,
+	RELAY_RUNNER_SOCKET_ENV,
+} from "../../src/runs/shared/relay-exposure.ts";
+import {
 	SUBAGENT_FANOUT_CHILD_ENV,
 	SUBAGENT_PARENT_CHILD_INDEX_ENV,
 	SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV,
@@ -41,6 +46,8 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_CAPABILITY_TOKEN: process.env.PI_SUBAGENT_PARENT_CAPABILITY_TOKEN,
 	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
+	PI_SUBAGENT_RELAY_RUNNER_DELEGATION: process.env.PI_SUBAGENT_RELAY_RUNNER_DELEGATION,
+	PI_SUBAGENT_RELAY_RUNNER_SOCKET: process.env.PI_SUBAGENT_RELAY_RUNNER_SOCKET,
 };
 const originalCwd = process.cwd();
 const tempRoots: string[] = [];
@@ -866,10 +873,13 @@ describe("buildPiArgs system prompt mode wiring", () => {
 	});
 
 	it("emits a v1 child descriptor without suppressing inherited extensions", () => {
+		process.env[RELAY_RUNNER_DELEGATION_ENV] = `rprd1.99999999-9999-4999-8999-999999999999.${"z".repeat(43)}`;
+		process.env[RELAY_RUNNER_SOCKET_ENV] = "/tmp/must-not-reach-child.sock";
 		const childIdentity = {
 			workspaceId: "11111111-1111-4111-8111-111111111111",
 			agentId: "22222222-2222-4222-8222-222222222222",
 		};
+		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
 		const first = buildPiArgs({
 			baseArgs: ["-p"],
 			task: "hello",
@@ -880,6 +890,8 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			childAgentName: "reviewer",
 			childIndex: 3,
 			childIdentity,
+			childProcessEpoch: "33333333-3333-4333-8333-333333333333",
+			relayExposureCapability: relayCapability,
 			parentSessionId: "parent-session",
 			requestedExposure: "relay",
 			remotePiCompatibility: { state: "absent" },
@@ -908,7 +920,14 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(descriptor.workspaceId, childIdentity.workspaceId);
 		assert.equal(descriptor.agentId, childIdentity.agentId);
 		assert.equal(descriptor.agentId, nextDescriptor.agentId);
+		assert.equal(descriptor.processEpoch, "33333333-3333-4333-8333-333333333333");
 		assert.notEqual(descriptor.processEpoch, nextDescriptor.processEpoch);
+		assert.equal(first.env[RELAY_EXPOSURE_CAPABILITY_ENV], relayCapability);
+		assert.equal(second.env[RELAY_EXPOSURE_CAPABILITY_ENV], "");
+		assert.equal(first.env[RELAY_RUNNER_DELEGATION_ENV], "");
+		assert.equal(first.env[RELAY_RUNNER_SOCKET_ENV], "");
+		assert.equal(second.env[RELAY_RUNNER_DELEGATION_ENV], "");
+		assert.equal(second.env[RELAY_RUNNER_SOCKET_ENV], "");
 		assert.equal(descriptor.compatibility.remotePi.state, "absent");
 		assert.equal(descriptor.producer.name, "pi-subagents");
 	});

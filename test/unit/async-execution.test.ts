@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { buildAsyncRunnerSteps, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
+import { buildAsyncRunnerEnv, buildAsyncRunnerSteps, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
+import {
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_RUNNER_DELEGATION_ENV,
+	RELAY_RUNNER_SOCKET_ENV,
+} from "../../src/runs/shared/relay-exposure.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
 const agent = (name: string, toolBudget?: AgentConfig["toolBudget"], exposure?: AgentConfig["exposure"]): AgentConfig => ({
@@ -36,6 +41,31 @@ describe("async runner execution", () => {
 
 	it("omits runner log paths when asyncDir is unavailable", () => {
 		assert.equal(resolveAsyncRunnerLogPaths({}), undefined);
+	});
+
+	it("passes runner delegation only in trusted runner env and scrubs inherited child bearers", () => {
+		const inherited = {
+			SAFE: "value",
+			[RELAY_EXPOSURE_CAPABILITY_ENV]: "old-child-capability",
+			[RELAY_RUNNER_DELEGATION_ENV]: "old-runner-token",
+			[RELAY_RUNNER_SOCKET_ENV]: "/tmp/old.sock",
+		};
+		const token = `rprd1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const env = buildAsyncRunnerEnv(inherited, {
+			token,
+			socketPath: "/tmp/current.sock",
+			expiresAt: Date.now() + 60_000,
+			maxLeaseTtlMs: 30_000,
+			maxChildIssues: 4,
+		});
+		assert.equal(env.SAFE, "value");
+		assert.equal(env[RELAY_EXPOSURE_CAPABILITY_ENV], "");
+		assert.equal(env[RELAY_RUNNER_DELEGATION_ENV], token);
+		assert.equal(env[RELAY_RUNNER_SOCKET_ENV], "/tmp/current.sock");
+		const localOnly = buildAsyncRunnerEnv(inherited);
+		assert.equal(localOnly[RELAY_EXPOSURE_CAPABILITY_ENV], "");
+		assert.equal(localOnly[RELAY_RUNNER_DELEGATION_ENV], "");
+		assert.equal(localOnly[RELAY_RUNNER_SOCKET_ENV], "");
 	});
 
 	it("resolves async step tool budgets with step over run over agent over config precedence", () => {

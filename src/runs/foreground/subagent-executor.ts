@@ -13,6 +13,7 @@ import { handleManagementAction } from "../../agents/agent-management.ts";
 import { buildDoctorReport } from "../../extension/doctor.ts";
 import { clearPendingForegroundControlNotices } from "../../extension/control-notices.ts";
 import { runSync } from "./execution.ts";
+import { resolveForegroundRelayExposureController } from "./relay-exposure-controller.ts";
 import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/tool-actions.ts";
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
 import { resolveModelCandidate, resolveSubagentModelOverride } from "../shared/model-fallback.ts";
@@ -47,7 +48,13 @@ import {
 	type StepOverrides,
 } from "../../shared/settings.ts";
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
-import { buildAsyncRunnerSteps, executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
+import {
+	buildAsyncRunnerSteps,
+	executeAsyncChainWithRelay as executeAsyncChain,
+	executeAsyncSingleWithRelay as executeAsyncSingle,
+	formatAsyncStartedMessage,
+	isAsyncAvailable,
+} from "../background/async-execution.ts";
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
@@ -124,7 +131,7 @@ import {
 	wrapForkTask,
 } from "../../shared/types.ts";
 
-const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset", "watchdog.configure"]);
+const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset", "watchdog.configure", "exposure"]);
 interface TaskParam {
 	agent: string;
 	task: string;
@@ -157,6 +164,7 @@ export interface SubagentParamsLike {
 	worktree?: boolean;
 	context?: "fresh" | "fork";
 	exposure?: ChildExposureMode;
+	ttlMs?: number;
 	async?: boolean;
 	timeoutMs?: number;
 	maxRuntimeMs?: number;
@@ -1238,7 +1246,7 @@ async function resumeAsyncRun(input: {
 		const contextPolicy = resolveExplicitContextPolicy(input.params);
 		const chain = wrapChainTasksForFork(attachChain, contextPolicy);
 		const normalized = normalizeSkillInput(input.params.skill);
-		const result = executeAsyncChain(runId, {
+		const result = await executeAsyncChain(runId, {
 			workspaceId: target.childIdentity.workspaceId,
 			chain,
 			task: (input.params.task ?? followUp) || undefined,
@@ -1294,7 +1302,7 @@ async function resumeAsyncRun(input: {
 	const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
-	const result = executeAsyncSingle(runId, {
+	const result = await executeAsyncSingle(runId, {
 		workspaceId: target.childIdentity.workspaceId,
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
@@ -3358,6 +3366,45 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					}
 				}
 				return inspectSubagentStatus(paramsWithResolvedCwd, { state: deps.state, nested: nestedScope, sessionRoots });
+			}
+			if (action === "exposure") {
+				if (deps.allowMutatingManagementActions === false) {
+					return {
+						content: [{ type: "text", text: "Action 'exposure' is not available from child-safe subagent fanout mode." }],
+						isError: true,
+						details: { mode: "management" as const, results: [] },
+					};
+				}
+				const targetRunId = paramsWithResolvedCwd.id ?? paramsWithResolvedCwd.runId;
+				if (!targetRunId) return { content: [{ type: "text", text: "action='exposure' requires id." }], isError: true, details: { mode: "management", results: [] } };
+				if (paramsWithResolvedCwd.exposure !== "relay" && paramsWithResolvedCwd.exposure !== "local") {
+					return { content: [{ type: "text", text: "action='exposure' requires exposure='relay' or exposure='local'." }], isError: true, details: { mode: "management", results: [] } };
+				}
+				let parentSessionId: string | undefined;
+				try { parentSessionId = ctx.sessionManager.getSessionId() ?? undefined; } catch { /* fail closed below */ }
+				const resolved = resolveForegroundRelayExposureController({
+					runId: targetRunId,
+					index: paramsWithResolvedCwd.index,
+					parentSessionId,
+				});
+				if (!resolved.controller) {
+					return { content: [{ type: "text", text: resolved.error ?? "Live foreground relay exposure controller is unavailable." }], isError: true, details: { mode: "management", results: [] } };
+				}
+				const result = paramsWithResolvedCwd.exposure === "relay"
+					? await resolved.controller.relay(paramsWithResolvedCwd.ttlMs)
+					: await resolved.controller.local();
+				if (!result.ok) {
+					return {
+						content: [{ type: "text", text: `Relay exposure ${paramsWithResolvedCwd.exposure === "relay" ? "promotion" : "demotion"} denied for ${resolved.controller.runId}#${resolved.controller.index}: ${result.reason}.` }],
+						isError: true,
+						details: { mode: "management", results: [] },
+					};
+				}
+				const effectiveMode = paramsWithResolvedCwd.exposure;
+				return {
+					content: [{ type: "text", text: `Relay exposure ${result.state} for live foreground child ${resolved.controller.runId}#${resolved.controller.index}; effective requested mode is ${effectiveMode}.` }],
+					details: { mode: "management", results: [] },
+				};
 			}
 			if (action === "resume") {
 				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });

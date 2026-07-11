@@ -265,8 +265,9 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	exposure: Type.Optional(Type.String({
 		enum: ["off", "local", "relay"],
-		description: "Requested remote-pi exposure for every child in this invocation. This is non-authoritative intent; relay still requires separate authorization. Overrides agent frontmatter; defaults to local.",
+		description: "Requested remote-pi exposure. In execution mode this applies non-authoritative intent to every child; with action='exposure', use relay/local for one authoritative live foreground target.",
 	})),
+	ttlMs: Type.Optional(Type.Integer({ minimum: 1, description: "Requested bounded relay lease TTL for action='exposure'. The delegated broker policy enforces its maximum." })),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs. Alias of maxRuntimeMs." })),

@@ -25,6 +25,7 @@ Use contact_supervisor first. It resolves the supervisor session "{orchestratorT
 - After contact_supervisor with reason "need_decision" or "interview_request", stay alive and continue only after the reply arrives. Do not finish your final response with a choose-one question.
 - Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions. Review-only/no-edit wins; leave files unchanged and mention the conflict in your final result only if it matters.
 - Meaningful progress or unexpected discoveries that change the plan: contact_supervisor({ reason: "progress_update", message: "UPDATE: <summary>" })
+- Request a temporary phone relay change without authorizing it yourself: request_relay_exposure({ mode: "relay" | "local", ttlMs?: 60000 }). The exact live parent must separately approve and apply it.
 - Generic intercom is lower-level plumbing/fallback only: intercom({ action: "ask", to: "{orchestratorTarget}", message: "<question>" })
 
 Do not use contact_supervisor or intercom for routine completion handoffs. If no coordination is needed, return a focused task result.`;
@@ -160,7 +161,7 @@ export function resolveIntercomBridge(input: ResolveIntercomBridgeInput): Interc
 export function applyIntercomBridgeToAgent(agent: AgentConfig, bridge: IntercomBridgeState): AgentConfig {
 	if (!bridge.active || !bridge.orchestratorTarget) return agent;
 
-	const bridgeTools = ["intercom", "contact_supervisor"];
+	const bridgeTools = ["intercom", "contact_supervisor", "request_relay_exposure"];
 	const tools = agent.tools
 		? [...agent.tools, ...bridgeTools.filter((tool) => !agent.tools?.includes(tool))]
 		: agent.tools;

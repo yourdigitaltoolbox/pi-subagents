@@ -289,6 +289,9 @@ async function main() {
 			args,
 			systemPrompts: readSystemPromptRecords(args),
 			childDescriptor: process.env.PI_SUBAGENT_DESCRIPTOR ?? null,
+			relayExposureCapabilityPresent: Boolean(process.env.PI_SUBAGENT_RELAY_EXPOSURE_CAPABILITY),
+			relayRunnerDelegationPresent: Boolean(process.env.PI_SUBAGENT_RELAY_RUNNER_DELEGATION),
+			relayRunnerSocketPresent: Boolean(process.env.PI_SUBAGENT_RELAY_RUNNER_SOCKET),
 		}),
 		"utf-8",
 	);

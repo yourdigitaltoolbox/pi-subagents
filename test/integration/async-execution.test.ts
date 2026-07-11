@@ -10,6 +10,8 @@
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createServer } from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,6 +20,13 @@ import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest } from "../../src/runs/background/control-channel.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
+import {
+	RELAY_EXPOSURE_CAPABILITY_ENV,
+	RELAY_EXPOSURE_REQUEST_EVENT,
+	RELAY_RUNNER_DELEGATION_ENV,
+	RELAY_RUNNER_SOCKET_ENV,
+	relayExposureReplyEvent,
+} from "../../src/runs/shared/relay-exposure.ts";
 
 interface AsyncExecutionResult {
 	content: Array<{ text?: string }>;
@@ -93,6 +102,10 @@ interface AsyncStatusPayload {
 interface MockPiCallRecord {
 	args?: string[];
 	systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
+	childDescriptor?: string | null;
+	relayExposureCapabilityPresent?: boolean;
+	relayRunnerDelegationPresent?: boolean;
+	relayRunnerSocketPresent?: boolean;
 }
 
 function writeWatchdogSettings(projectDir: string, tailMs = 120_000): void {
@@ -170,6 +183,8 @@ interface AsyncExecutionModule {
 	isAsyncAvailable(): boolean;
 	executeAsyncSingle(id: string, params: Record<string, unknown>): AsyncExecutionResult;
 	executeAsyncChain(id: string, params: Record<string, unknown>): AsyncExecutionResult;
+	executeAsyncSingleWithRelay(id: string, params: Record<string, unknown>): Promise<AsyncExecutionResult>;
+	executeAsyncChainWithRelay(id: string, params: Record<string, unknown>): Promise<AsyncExecutionResult>;
 }
 
 interface UtilsModule {
@@ -197,6 +212,8 @@ const available = !!(asyncMod && utils && typesMod);
 const isAsyncAvailable = asyncMod?.isAsyncAvailable;
 const executeAsyncSingle = asyncMod?.executeAsyncSingle;
 const executeAsyncChain = asyncMod?.executeAsyncChain;
+const executeAsyncSingleWithRelay = asyncMod?.executeAsyncSingleWithRelay;
+const executeAsyncChainWithRelay = asyncMod?.executeAsyncChainWithRelay;
 const readStatus = utils?.readStatus;
 const ASYNC_DIR = typesMod?.ASYNC_DIR;
 const RESULTS_DIR = typesMod?.RESULTS_DIR;
@@ -271,7 +288,7 @@ async function waitForAsyncResultFile(id: string, timeoutMs = 15_000): Promise<s
 	return resultPath;
 }
 
-async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<{ args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> }> {
+async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<MockPiCallRecord & { args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> }> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
 		const callFile = fs.readdirSync(mockPi.dir)
@@ -281,7 +298,7 @@ async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_0
 		if (callFile) {
 			const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as MockPiCallRecord;
 			assert.ok(Array.isArray(payload.args), "expected recorded args");
-			return { args: payload.args, systemPrompts: payload.systemPrompts ?? [] };
+			return { ...payload, args: payload.args, systemPrompts: payload.systemPrompts ?? [] };
 		}
 		if (Date.now() > deadline) assert.fail(`Timed out waiting for recorded mock pi call ${index}`);
 		await new Promise((resolve) => setTimeout(resolve, 100));
@@ -324,6 +341,94 @@ function readMockPiArgsMatching(mockPi: MockPi, text: string): string[] {
 		if (payload.args.join("\n").includes(text)) return payload.args;
 	}
 	assert.fail(`expected recorded call containing ${text}`);
+}
+
+async function createRelayRunnerHarness(root: string): Promise<{
+	eventBus: ReturnType<typeof createEventBus>;
+	delegations: Array<{ rootRunId: string; token: string }>;
+	requests: Array<Record<string, unknown>>;
+	close(): Promise<void>;
+}> {
+	const socketPath = path.join(root, "relay-runner-harness.sock");
+	const delegations: Array<{ rootRunId: string; token: string }> = [];
+	const requests: Array<Record<string, unknown>> = [];
+	const leases = new Map<string, Record<string, unknown>>();
+	let issueCount = 0;
+	const server = createServer((socket) => {
+		socket.setEncoding("utf8");
+		let buffer = "";
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			const newline = buffer.indexOf("\n");
+			if (newline < 0) return;
+			const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+			requests.push(request);
+			const base = { type: "relay_runner_result", version: 1, requestId: request.requestId, ok: true };
+			if (request.type === "relay_runner_issue") {
+				issueCount++;
+				const suffix = String(issueCount).padStart(12, "0");
+				const relayExposureLeaseId = `55555555-5555-4555-8555-${suffix}`;
+				const binding = request.binding as Record<string, unknown>;
+				const lease = {
+					relayExposureLeaseId,
+					parent: {
+						workspaceId: binding.workspaceId,
+						agentId: "66666666-6666-4666-8666-666666666666",
+						processEpoch: "77777777-7777-4777-8777-777777777777",
+					},
+					binding,
+					issuedAt: Date.now(),
+					expiresAt: Date.now() + 60_000,
+				};
+				leases.set(relayExposureLeaseId, lease);
+				socket.end(`${JSON.stringify({ ...base, state: "issued", capability: `rpel1.${relayExposureLeaseId}.${"b".repeat(43)}`, lease })}\n`);
+				return;
+			}
+			if (request.type === "relay_runner_release") {
+				socket.end(`${JSON.stringify({ ...base, state: "released" })}\n`);
+				return;
+			}
+			const relayExposureLeaseId = request.relayExposureLeaseId as string;
+			const lease = leases.get(relayExposureLeaseId);
+			assert.ok(lease, `expected lease ${relayExposureLeaseId}`);
+			if (request.type === "relay_runner_renew") {
+				const renewed = { ...lease, expiresAt: Date.now() + 60_000 };
+				leases.set(relayExposureLeaseId, renewed);
+				socket.end(`${JSON.stringify({ ...base, state: "renewed", lease: renewed })}\n`);
+				return;
+			}
+			socket.end(`${JSON.stringify({ ...base, state: request.type === "relay_runner_revoke" ? "revoked" : "closed", lease })}\n`);
+		});
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	const eventBus = createEventBus();
+	eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+		const request = raw as Record<string, unknown>;
+		if (request.method !== "delegate_runner") return;
+		const delegationId = randomUUID();
+		const token = `rprd1.${delegationId}.${"a".repeat(43)}`;
+		delegations.push({ rootRunId: request.rootRunId as string, token });
+		eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
+			version: 1,
+			requestId: request.requestId,
+			success: true,
+			ok: true,
+			token,
+			socketPath,
+			expiresAt: Date.now() + Math.max(1_000, Number(request.delegationTtlMs) - 1_000),
+			maxLeaseTtlMs: request.maxLeaseTtlMs,
+			maxChildIssues: request.maxChildIssues,
+		});
+	});
+	return {
+		eventBus,
+		delegations,
+		requests,
+		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+	};
 }
 
 describe("async execution utilities", { skip: !available ? "pi packages not available" : undefined }, () => {
@@ -380,6 +485,551 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(descriptor.requestedExposure, "off");
 		const args = await waitForMockPiArgs(mockPi, 0);
 		assert.ok(!args.includes("--no-extensions"));
+	});
+
+	it("keeps async runner delegation in memory, scrubs child env, and closes through strict local IPC", { skip: !isAsyncAvailable() || !executeAsyncSingleWithRelay ? "jiti or relay wrapper not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 750, output: "relay child done" });
+		const id = `async-relay-${Date.now().toString(36)}`;
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const token = `rprd1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
+		const leaseId = "55555555-5555-4555-8555-555555555555";
+		const childCapability = `rpel1.${leaseId}.${"b".repeat(43)}`;
+		const socketPath = path.join(tempDir, "relay-broker.sock");
+		const requests: Array<Record<string, unknown>> = [];
+		let issuedLease: Record<string, unknown> | undefined;
+		const server = createServer((socket) => {
+			socket.setEncoding("utf8");
+			let buffer = "";
+			socket.on("data", (chunk: string) => {
+				buffer += chunk;
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) return;
+				const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+				requests.push(request);
+				const base = { type: "relay_runner_result", version: 1, requestId: request.requestId, ok: true };
+				if (request.type === "relay_runner_issue") {
+					issuedLease = {
+						relayExposureLeaseId: leaseId,
+						parent: {
+							workspaceId,
+							agentId: "66666666-6666-4666-8666-666666666666",
+							processEpoch: "77777777-7777-4777-8777-777777777777",
+						},
+						binding: request.binding,
+						issuedAt: Date.now(),
+						expiresAt: Date.now() + 500,
+					};
+					socket.end(`${JSON.stringify({ ...base, state: "issued", capability: childCapability, lease: issuedLease })}\n`);
+				} else if (request.type === "relay_runner_renew") {
+					issuedLease = { ...issuedLease, expiresAt: Date.now() + 1_000 };
+					socket.end(`${JSON.stringify({ ...base, state: "renewed", lease: issuedLease })}\n`);
+				} else if (request.type === "relay_runner_close") {
+					socket.end(`${JSON.stringify({ ...base, state: "closed", lease: issuedLease })}\n`);
+				} else if (request.type === "relay_runner_release") {
+					socket.end(`${JSON.stringify({ ...base, state: "released" })}\n`);
+				} else {
+					socket.end(`${JSON.stringify({ ...base, state: "renewed", lease: issuedLease })}\n`);
+				}
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socketPath, resolve);
+		});
+		try {
+			const eventBus = createEventBus();
+			eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+				const request = raw as Record<string, unknown>;
+				if (request.method !== "delegate_runner") return;
+				eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
+					version: 1,
+					requestId: request.requestId,
+					success: true,
+					ok: true,
+					token,
+					socketPath,
+					expiresAt: Date.now() + 470_000,
+					maxLeaseTtlMs: request.maxLeaseTtlMs,
+					maxChildIssues: request.maxChildIssues,
+				});
+			});
+			const launched = await executeAsyncSingleWithRelay!(id, {
+				workspaceId,
+				agent: "worker",
+				task: "Run with relay",
+				agentConfig: makeAgent("worker", { exposure: "relay" }),
+				ctx: { pi: { events: eventBus }, cwd: tempDir, currentSessionId: "session-relay" },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				maxSubagentDepth: 2,
+			});
+			assert.equal(launched.isError, undefined);
+			const resultPath = await waitForAsyncResultFile(id, 30_000);
+			const deadline = Date.now() + 5_000;
+			while (!requests.some((request) => request.type === "relay_runner_release") && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			const lifecycleTypes = requests.map((request) => request.type);
+			assert.equal(lifecycleTypes[0], "relay_runner_issue");
+			assert.equal(lifecycleTypes.at(-2), "relay_runner_close");
+			assert.equal(lifecycleTypes.at(-1), "relay_runner_release");
+			assert.ok(lifecycleTypes.slice(1, -2).length >= 1);
+			assert.ok(lifecycleTypes.slice(1, -2).every((type) => type === "relay_runner_renew"));
+			assert.ok(requests.every((request) => request.token === token));
+			const issue = requests[0]!;
+			const binding = issue.binding as Record<string, unknown>;
+			assert.equal(binding.runId, id);
+			assert.equal(binding.workspaceId, workspaceId);
+			const call = await waitForMockPiCall(mockPi, 0);
+			const descriptor = JSON.parse(call.childDescriptor ?? "null") as Record<string, unknown>;
+			assert.equal(descriptor.processEpoch, binding.processEpoch);
+			assert.equal(call.relayExposureCapabilityPresent, true);
+			assert.equal(call.relayRunnerDelegationPresent, false);
+			assert.equal(call.relayRunnerSocketPresent, false);
+			assert.equal(fs.existsSync(path.join(TEMP_ROOT_DIR, `async-cfg-${id}.json`)), false);
+			const asyncDir = path.join(ASYNC_DIR, id);
+			const persisted = [resultPath, ...fs.readdirSync(asyncDir).map((name) => path.join(asyncDir, name))]
+				.filter((filePath) => fs.statSync(filePath).isFile())
+				.map((filePath) => fs.readFileSync(filePath, "utf8"))
+				.join("\n");
+			assert.equal(persisted.includes(token), false);
+			assert.equal(persisted.includes(socketPath), false);
+			assert.equal(persisted.includes(childCapability), false);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
+	it("reuses one in-memory runner token for static, dynamic, and appended relay children", { skip: !isAsyncAvailable() || !executeAsyncChainWithRelay || !createSubagentExecutor ? "jiti, relay wrapper, or executor not available" : undefined }, async () => {
+		mockPi.onCall({ output: "static-a" });
+		mockPi.onCall({ output: "static-b" });
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
+		mockPi.onCall({ delay: 1_000, output: "tail" });
+		mockPi.onCall({ output: "appended" });
+		const id = `async-relay-chain-${Date.now().toString(36)}`;
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const token = `rprd1.44444444-4444-4444-8444-444444444444.${"c".repeat(43)}`;
+		const socketPath = path.join(tempDir, "relay-chain-broker.sock");
+		const requests: Array<Record<string, unknown>> = [];
+		const leases = new Map<string, Record<string, unknown>>();
+		let issueCounter = 0;
+		const server = createServer((socket) => {
+			socket.setEncoding("utf8");
+			let buffer = "";
+			socket.on("data", (chunk: string) => {
+				buffer += chunk;
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) return;
+				const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+				requests.push(request);
+				const base = { type: "relay_runner_result", version: 1, requestId: request.requestId, ok: true };
+				if (request.type === "relay_runner_issue") {
+					issueCounter++;
+					const suffix = String(issueCounter).padStart(12, "0");
+					const leaseId = `55555555-5555-4555-8555-${suffix}`;
+					const lease = {
+						relayExposureLeaseId: leaseId,
+						parent: {
+							workspaceId,
+							agentId: "66666666-6666-4666-8666-666666666666",
+							processEpoch: "77777777-7777-4777-8777-777777777777",
+						},
+						binding: request.binding,
+						issuedAt: Date.now(),
+						expiresAt: Date.now() + 60_000,
+					};
+					leases.set(leaseId, lease);
+					socket.end(`${JSON.stringify({ ...base, state: "issued", capability: `rpel1.${leaseId}.${"d".repeat(43)}`, lease })}\n`);
+					return;
+				}
+				if (request.type === "relay_runner_release") {
+					socket.end(`${JSON.stringify({ ...base, state: "released" })}\n`);
+					return;
+				}
+				const leaseId = request.relayExposureLeaseId as string;
+				const lease = leases.get(leaseId)!;
+				if (request.type === "relay_runner_renew") {
+					const renewed = { ...lease, expiresAt: Date.now() + 60_000 };
+					leases.set(leaseId, renewed);
+					socket.end(`${JSON.stringify({ ...base, state: "renewed", lease: renewed })}\n`);
+					return;
+				}
+				socket.end(`${JSON.stringify({ ...base, state: request.type === "relay_runner_revoke" ? "revoked" : "closed", lease })}\n`);
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socketPath, resolve);
+		});
+		try {
+			const eventBus = createEventBus();
+			eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
+				const request = raw as Record<string, unknown>;
+				if (request.method !== "delegate_runner") return;
+				eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
+					version: 1,
+					requestId: request.requestId,
+					success: true,
+					ok: true,
+					token,
+					socketPath,
+					expiresAt: Date.now() + 470_000,
+					maxLeaseTtlMs: request.maxLeaseTtlMs,
+					maxChildIssues: request.maxChildIssues,
+				});
+			});
+			const agents = [
+				makeAgent("static", { exposure: "relay" }),
+				makeAgent("producer", { exposure: "local" }),
+				makeAgent("reviewer", { exposure: "relay" }),
+				makeAgent("tail", { exposure: "local" }),
+				makeAgent("appended", { exposure: "relay" }),
+			];
+			const launched = await executeAsyncChainWithRelay!(id, {
+				workspaceId,
+				chain: [
+					{ parallel: [{ agent: "static", task: "Static A" }, { agent: "static", task: "Static B" }], concurrency: 2 },
+					{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+					{
+						expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+						parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } },
+						collect: { as: "reviews" },
+						concurrency: 1,
+					},
+					{ agent: "tail", task: "Keep runner alive" },
+				],
+				agents,
+				ctx: { pi: { events: eventBus }, cwd: tempDir, currentSessionId: "session-relay-chain" },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				dynamicFanoutMaxItems: 2,
+				maxSubagentDepth: 2,
+			});
+			assert.equal(launched.isError, undefined);
+			await waitForMockPiCall(mockPi, 5, 15_000);
+			const executor = createSubagentExecutor!({
+				pi: { events: eventBus, getSessionName: () => undefined },
+				state: { baseCwd: tempDir, currentSessionId: "session-relay-chain", asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+				config: {},
+				asyncByDefault: false,
+				tempArtifactsDir: tempDir,
+				getSubagentSessionRoot: () => tempDir,
+				expandTilde: (value: string) => value,
+				discoverAgents: () => ({ agents }),
+			});
+			const appendResult = await executor.execute(
+				"append-relay",
+				{ action: "append-step", id, chain: [{ agent: "appended", task: "Appended relay" }] },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(appendResult.isError, undefined, JSON.stringify(appendResult.content));
+			const resultPath = await waitForAsyncResultFile(id, 20_000);
+			const deadline = Date.now() + 5_000;
+			while (!requests.some((request) => request.type === "relay_runner_release") && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			const capabilityStates = await Promise.all(Array.from({ length: 7 }, async (_, index) =>
+				(await waitForMockPiCall(mockPi, index)).relayExposureCapabilityPresent));
+			assert.deepEqual(capabilityStates, [true, true, false, true, true, false, true]);
+			assert.equal(requests.filter((request) => request.type === "relay_runner_issue").length, 5);
+			assert.equal(requests.filter((request) => request.type === "relay_runner_close").length, 5);
+			assert.equal(requests.filter((request) => request.type === "relay_runner_release").length, 1);
+			assert.ok(requests.every((request) => request.token === token));
+			const epochs = requests
+				.filter((request) => request.type === "relay_runner_issue")
+				.map((request) => (request.binding as Record<string, unknown>).processEpoch);
+			assert.equal(new Set(epochs).size, 5);
+			for (const index of [0, 1, 3, 4, 6]) {
+				const call = await waitForMockPiCall(mockPi, index);
+				assert.equal(call.relayExposureCapabilityPresent, true);
+				assert.equal(call.relayRunnerDelegationPresent, false);
+				assert.equal(call.relayRunnerSocketPresent, false);
+			}
+			for (const index of [2, 5]) {
+				const call = await waitForMockPiCall(mockPi, index);
+				assert.equal(call.relayExposureCapabilityPresent, false);
+			}
+			const asyncDir = path.join(ASYNC_DIR, id);
+			const persisted = [resultPath, ...fs.readdirSync(asyncDir).map((name) => path.join(asyncDir, name))]
+				.filter((filePath) => fs.statSync(filePath).isFile())
+				.map((filePath) => fs.readFileSync(filePath, "utf8"))
+				.join("\n");
+			assert.equal(persisted.includes(token), false);
+			assert.equal(persisted.includes(socketPath), false);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
+	it("reevaluates resume policy with stable logical identity, a fresh epoch, and fresh runner authority", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		mockPi.onCall({ output: "relay revive done" });
+		mockPi.onCall({ output: "local revive done" });
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const agentId = "22222222-2222-4222-8222-222222222222";
+		const priorProcessEpoch = "33333333-3333-4333-8333-333333333333";
+		const priorLeaseId = "44444444-4444-4444-8444-444444444444";
+		const relaySourceId = `async-resume-relay-${Date.now().toString(36)}`;
+		const localSourceId = `async-resume-local-${Date.now().toString(36)}`;
+		const relaySessionFile = path.join(tempDir, "relay-resume.jsonl");
+		const localSessionFile = path.join(tempDir, "local-resume.jsonl");
+		const harness = await createRelayRunnerHarness(tempDir);
+		const createdRunIds: string[] = [relaySourceId, localSourceId];
+		const writeCompletedSource = (runId: string, sessionFile: string) => {
+			fs.writeFileSync(sessionFile, "", "utf8");
+			const asyncDir = path.join(ASYNC_DIR, runId);
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				workspaceId,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "complete",
+					sessionFile,
+					workspaceId,
+					agentId,
+					// Safe prior lifecycle metadata must not become revive authority.
+					processEpoch: priorProcessEpoch,
+					relayExposureLeaseId: priorLeaseId,
+				}],
+			}, null, 2), "utf8");
+		};
+		writeCompletedSource(relaySourceId, relaySessionFile);
+		writeCompletedSource(localSourceId, localSessionFile);
+		try {
+			const makeResumeExecutor = (agent: ReturnType<typeof makeAgent>) => createSubagentExecutor!({
+				pi: { events: harness.eventBus, getSessionName: () => undefined },
+				state: { baseCwd: tempDir, currentSessionId: "resume-parent", asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+				config: {},
+				asyncByDefault: false,
+				tempArtifactsDir: tempDir,
+				getSubagentSessionRoot: () => tempDir,
+				expandTilde: (value: string) => value,
+				discoverAgents: () => ({ agents: [agent] }),
+			});
+
+			const relayResume = await makeResumeExecutor(makeAgent("worker", { exposure: "relay" })).execute(
+				"resume-relay",
+				{ action: "resume", id: relaySourceId, message: "Continue with current relay policy" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(relayResume.isError, undefined, JSON.stringify(relayResume.content));
+			const relayRevivedId = relayResume.details?.asyncId;
+			assert.ok(relayRevivedId, "expected relay revive run id");
+			createdRunIds.push(relayRevivedId);
+			await waitForAsyncResultFile(relayRevivedId, 30_000);
+			const relayCall = await waitForMockPiCall(mockPi, 0);
+			const relayDescriptor = JSON.parse(relayCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+			assert.equal(relayDescriptor.workspaceId, workspaceId);
+			assert.equal(relayDescriptor.agentId, agentId);
+			assert.notEqual(relayDescriptor.processEpoch, priorProcessEpoch);
+			assert.equal(relayCall.relayExposureCapabilityPresent, true);
+			assert.equal(harness.delegations.length, 1);
+			assert.equal(harness.delegations[0]?.rootRunId, relayRevivedId);
+			const relayIssue = harness.requests.find((request) => request.type === "relay_runner_issue");
+			assert.ok(relayIssue, "expected fresh relay issue for revived process");
+			assert.equal(relayIssue.token, harness.delegations[0]?.token);
+			assert.equal((relayIssue.binding as Record<string, unknown>).agentId, agentId);
+			assert.equal((relayIssue.binding as Record<string, unknown>).processEpoch, relayDescriptor.processEpoch);
+
+			const localResume = await makeResumeExecutor(makeAgent("worker", { exposure: "local" })).execute(
+				"resume-local",
+				{ action: "resume", id: localSourceId, message: "Continue under current local policy" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(localResume.isError, undefined, JSON.stringify(localResume.content));
+			const localRevivedId = localResume.details?.asyncId;
+			assert.ok(localRevivedId, "expected local revive run id");
+			createdRunIds.push(localRevivedId);
+			await waitForAsyncResultFile(localRevivedId, 30_000);
+			const localCall = await waitForMockPiCall(mockPi, 1);
+			const localDescriptor = JSON.parse(localCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+			assert.equal(localDescriptor.workspaceId, workspaceId);
+			assert.equal(localDescriptor.agentId, agentId);
+			assert.notEqual(localDescriptor.processEpoch, priorProcessEpoch);
+			assert.notEqual(localDescriptor.processEpoch, relayDescriptor.processEpoch);
+			assert.equal(localCall.relayExposureCapabilityPresent, false);
+			assert.equal(harness.delegations.length, 1, "prior live promotion must not survive current local policy");
+		} finally {
+			await harness.close();
+			for (const runId of createdRunIds) {
+				fs.rmSync(path.join(ASYNC_DIR, runId), { recursive: true, force: true });
+				fs.rmSync(path.join(RESULTS_DIR, `${runId}.json`), { force: true });
+			}
+		}
+	});
+
+	it("does not request runner authority when an explicit extension allowlist omits remote-pi", { skip: !isAsyncAvailable() || !executeAsyncSingleWithRelay ? "jiti or relay wrapper not available" : undefined }, async () => {
+		mockPi.onCall({ output: "explicit allowlist child done" });
+		const id = `async-relay-allowlist-denied-${Date.now().toString(36)}`;
+		const eventBus = createEventBus();
+		let delegationRequests = 0;
+		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, () => { delegationRequests++; });
+		const launched = await executeAsyncSingleWithRelay!(id, {
+			workspaceId: "11111111-1111-4111-8111-111111111111",
+			agent: "worker",
+			task: "Run without remote-pi",
+			agentConfig: makeAgent("worker", { exposure: "relay", extensions: ["./other-extension.ts"] }),
+			ctx: { pi: { events: eventBus }, cwd: tempDir, currentSessionId: "session-relay-allowlist" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+		assert.equal(launched.isError, undefined);
+		try {
+			await waitForAsyncResultFile(id, 30_000);
+			const call = await waitForMockPiCall(mockPi, 0);
+			assert.equal(delegationRequests, 0);
+			assert.equal(call.relayExposureCapabilityPresent, false);
+			assert.equal(call.relayRunnerDelegationPresent, false);
+			assert.equal(call.relayRunnerSocketPresent, false);
+			assert.ok(call.args.includes("--extension"));
+			assert.ok(call.args.includes("./other-extension.ts"));
+		} finally {
+			fs.rmSync(path.join(ASYNC_DIR, id), { recursive: true, force: true });
+			fs.rmSync(path.join(RESULTS_DIR, `${id}.json`), { force: true });
+		}
+	});
+
+	it("emits typed relay close for nonzero, timeout, and interruption, then releases on spawn failure", { skip: !isAsyncAvailable() || !executeAsyncSingleWithRelay ? "jiti or relay wrapper not available" : process.platform === "win32" ? "cross-process signal delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ exitCode: 1, output: "nonzero child" });
+		mockPi.onCall({ delay: 5_000, output: "timeout child" });
+		mockPi.onCall({ delay: 5_000, output: "interrupted child" });
+		const harness = await createRelayRunnerHarness(tempDir);
+		const workspaceId = "11111111-1111-4111-8111-111111111111";
+		const runIds = {
+			nonzero: `async-relay-nonzero-${Date.now().toString(36)}`,
+			timeout: `async-relay-timeout-${Date.now().toString(36)}`,
+			interrupted: `async-relay-interrupted-${Date.now().toString(36)}`,
+			spawnFailure: `async-relay-spawn-failure-${Date.now().toString(36)}`,
+		};
+		const launch = (id: string, timeoutMs?: number) => executeAsyncSingleWithRelay!(id, {
+			workspaceId,
+			agent: "worker",
+			task: id,
+			agentConfig: makeAgent("worker", { exposure: "relay" }),
+			ctx: { pi: { events: harness.eventBus }, cwd: tempDir, currentSessionId: "session-relay-negative" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			...(timeoutMs !== undefined ? { timeoutMs } : {}),
+		});
+		const waitForReleases = async (count: number) => {
+			const deadline = Date.now() + 10_000;
+			while (harness.requests.filter((request) => request.type === "relay_runner_release").length < count && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(
+				harness.requests.filter((request) => request.type === "relay_runner_release").length,
+				count,
+				JSON.stringify(harness.requests.map((request) => ({ type: request.type, reason: request.reason }))),
+			);
+		};
+		try {
+			assert.equal((await launch(runIds.nonzero)).isError, undefined);
+			await waitForAsyncResultFile(runIds.nonzero, 30_000);
+			await waitForReleases(1);
+
+			assert.equal((await launch(runIds.timeout, 750)).isError, undefined);
+			const timeoutResultPath = await waitForAsyncResultFile(runIds.timeout, 10_000);
+			const timeoutResult = JSON.parse(fs.readFileSync(timeoutResultPath, "utf8")) as AsyncResultPayload;
+			assert.equal(timeoutResult.timedOut, true);
+			await waitForReleases(2);
+
+			assert.equal((await launch(runIds.interrupted)).isError, undefined);
+			await waitForMockPiCall(mockPi, 2, 10_000);
+			const interruptedDir = path.join(ASYNC_DIR, runIds.interrupted);
+			const interruptedStatus = JSON.parse(fs.readFileSync(path.join(interruptedDir, "status.json"), "utf8")) as AsyncStatusPayload & { pid?: number };
+			deliverInterruptRequest({ asyncDir: interruptedDir, pid: interruptedStatus.pid, source: "relay-negative-test" });
+			const interruptedResultPath = await waitForAsyncResultFile(runIds.interrupted, 30_000);
+			const interruptedResult = JSON.parse(fs.readFileSync(interruptedResultPath, "utf8")) as AsyncResultPayload;
+			assert.equal(interruptedResult.state, "paused");
+			await waitForReleases(3);
+
+			const originalExecPath = process.execPath;
+			const pathKey = process.platform === "win32" ? "Path" : "PATH";
+			const originalPath = process.env[pathKey];
+			process.execPath = path.join(tempDir, process.platform === "win32" ? "pi.exe" : "pi");
+			process.env[pathKey] = tempDir;
+			try {
+				const failed = await launch(runIds.spawnFailure);
+				assert.equal(failed.isError, true);
+				assert.match(failed.content[0]?.text ?? "", /async runner did not produce a pid/);
+			} finally {
+				process.execPath = originalExecPath;
+				if (originalPath === undefined) delete process.env[pathKey];
+				else process.env[pathKey] = originalPath;
+			}
+			await waitForReleases(4);
+
+			const tokenFor = (runId: string) => harness.delegations.find((delegation) => delegation.rootRunId === runId)?.token;
+			const closeReasonFor = (runId: string) => harness.requests.find((request) => request.type === "relay_runner_close" && request.token === tokenFor(runId))?.reason;
+			assert.equal(closeReasonFor(runIds.nonzero), "controlled_shutdown");
+			assert.equal(closeReasonFor(runIds.timeout), "timeout");
+			assert.equal(closeReasonFor(runIds.interrupted), "interrupted");
+			assert.equal(harness.requests.some((request) => request.type === "relay_runner_issue" && request.token === tokenFor(runIds.spawnFailure)), false);
+			assert.equal(harness.requests.some((request) => request.type === "relay_runner_close" && request.token === tokenFor(runIds.spawnFailure)), false);
+			assert.equal(harness.requests.some((request) => request.type === "relay_runner_release" && request.token === tokenFor(runIds.spawnFailure)), true);
+		} finally {
+			await harness.close();
+			for (const runId of Object.values(runIds)) {
+				fs.rmSync(path.join(ASYNC_DIR, runId), { recursive: true, force: true });
+				fs.rmSync(path.join(RESULTS_DIR, `${runId}.json`), { force: true });
+			}
+		}
+	});
+
+	it("does not forge normal close or release when the detached runner is SIGKILLed", { skip: !isAsyncAvailable() || !executeAsyncSingleWithRelay ? "jiti or relay wrapper not available" : process.platform === "win32" ? "SIGKILL unavailable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ delay: 2_000, output: "orphan settles after runner death" });
+		const id = `async-relay-runner-sigkill-${Date.now().toString(36)}`;
+		const harness = await createRelayRunnerHarness(tempDir);
+		try {
+			const launched = await executeAsyncSingleWithRelay!(id, {
+				workspaceId: "11111111-1111-4111-8111-111111111111",
+				agent: "worker",
+				task: "Die abnormally",
+				agentConfig: makeAgent("worker", { exposure: "relay" }),
+				ctx: { pi: { events: harness.eventBus }, cwd: tempDir, currentSessionId: "session-relay-sigkill" },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				maxSubagentDepth: 2,
+			});
+			assert.equal(launched.isError, undefined);
+			await waitForMockPiCall(mockPi, 0, 10_000);
+			const asyncDir = path.join(ASYNC_DIR, id);
+			const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf8")) as AsyncStatusPayload & { pid?: number };
+			assert.equal(typeof status.pid, "number");
+			process.kill(status.pid!, "SIGKILL");
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline) {
+				try {
+					process.kill(status.pid!, 0);
+					await new Promise((resolve) => setTimeout(resolve, 20));
+				} catch {
+					break;
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			assert.deepEqual(harness.requests.map((request) => request.type), ["relay_runner_issue"]);
+			assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${id}.json`)), false);
+		} finally {
+			await harness.close();
+			fs.rmSync(path.join(ASYNC_DIR, id), { recursive: true, force: true });
+			fs.rmSync(path.join(RESULTS_DIR, `${id}.json`), { force: true });
+		}
 	});
 
 	it("preserves the run workspace identity through management append requests", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {

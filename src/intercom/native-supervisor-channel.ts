@@ -19,13 +19,20 @@ const SUPERVISOR_CHANNEL_ROOT = path.join(TEMP_ROOT_DIR, "supervisor-channels");
 const REQUESTS_DIR = "requests";
 const REPLIES_DIR = "replies";
 export const NATIVE_SUPERVISOR_TOOL_NAME = "subagent_supervisor";
+export const NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME = "request_relay_exposure";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
 const STALE_EMPTY_CHANNEL_AGE_MS = 60 * 1000;
 const STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS = 60 * 1000;
+const relayExposureClientRegistered = new WeakSet<object>();
+const RELAY_EXPOSURE_REQUEST_FIELDS = new Set([
+	"type", "id", "createdAt", "reason", "message", "expectsReply",
+	"orchestratorTarget", "orchestratorSessionId", "runId", "agent", "childIndex",
+	"childTarget", "requestedExposure", "ttlMs",
+]);
 
-type SupervisorReason = "need_decision" | "interview_request" | "progress_update";
+type SupervisorReason = "need_decision" | "interview_request" | "progress_update" | "relay_exposure";
 
 interface SupervisorRequest {
 	type: "subagent.supervisor.request";
@@ -42,6 +49,8 @@ interface SupervisorRequest {
 	childIndex: number;
 	childTarget?: string;
 	interview?: unknown;
+	requestedExposure?: "relay" | "local";
+	ttlMs?: number;
 }
 
 interface PendingSupervisorRequest extends SupervisorRequest {
@@ -57,7 +66,7 @@ interface SupervisorReply {
 }
 
 interface ContactSupervisorParams {
-	reason: SupervisorReason;
+	reason: Exclude<SupervisorReason, "relay_exposure">;
 	message?: string;
 	interview?: unknown;
 }
@@ -73,6 +82,11 @@ const ContactSupervisorParamsSchema = Type.Object({
 	reason: Type.String({ enum: ["need_decision", "interview_request", "progress_update"] }),
 	message: Type.Optional(Type.String()),
 	interview: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: true })),
+}, { additionalProperties: false });
+
+const RelayExposureRequestParamsSchema = Type.Object({
+	mode: Type.String({ enum: ["relay", "local"] }),
+	ttlMs: Type.Optional(Type.Integer({ minimum: 1 })),
 }, { additionalProperties: false });
 
 const IntercomParamsSchema = Type.Object({
@@ -137,6 +151,7 @@ function readChildMetadata(): {
 function reasonHeading(reason: SupervisorReason): string {
 	if (reason === "interview_request") return "Subagent requests a structured supervisor interview.";
 	if (reason === "progress_update") return "Subagent progress update.";
+	if (reason === "relay_exposure") return "Subagent requests a relay exposure change; this request is advisory and carries no authorization.";
 	return "Subagent needs a supervisor decision.";
 }
 
@@ -221,6 +236,52 @@ async function waitForReply(channelDir: string, requestId: string, deadline: num
 	throw new Error("Timed out waiting for supervisor reply.");
 }
 
+async function sendRelayExposureRequest(
+	params: { mode: "relay" | "local"; ttlMs?: number },
+): Promise<AgentToolResult<Record<string, unknown>>> {
+	const metadata = readChildMetadata();
+	if (!metadata) throw new Error("Native supervisor channel is not available for this subagent.");
+	if (params.mode !== "relay" && params.mode !== "local") throw new Error("mode must be relay or local.");
+	if (params.ttlMs !== undefined && (!Number.isSafeInteger(params.ttlMs) || params.ttlMs <= 0)) throw new Error("ttlMs must be a positive integer.");
+	ensureSupervisorChannelDir(metadata.channelDir);
+	const requestId = randomUUID();
+	const createdAt = Date.now();
+	const command = `subagent({ action: "exposure", id: "${metadata.runId}", index: ${metadata.childIndex}, exposure: "${params.mode}"${params.ttlMs === undefined ? "" : `, ttlMs: ${params.ttlMs}`} })`;
+	const message = [
+		reasonHeading("relay_exposure"),
+		`Run: ${metadata.runId}`,
+		`Agent: ${metadata.agent}`,
+		`Child index: ${metadata.childIndex}`,
+		"",
+		`Requested mode: ${params.mode}`,
+		"The exact delegated live parent must independently authorize and apply this request.",
+		`Parent action: ${command}`,
+	].join("\n");
+	const request: SupervisorRequest = {
+		type: "subagent.supervisor.request",
+		id: requestId,
+		createdAt,
+		reason: "relay_exposure",
+		message,
+		expectsReply: false,
+		...(metadata.orchestratorTarget ? { orchestratorTarget: metadata.orchestratorTarget } : {}),
+		...(metadata.orchestratorSessionId ? { orchestratorSessionId: metadata.orchestratorSessionId } : {}),
+		runId: metadata.runId,
+		agent: metadata.agent,
+		childIndex: metadata.childIndex,
+		...(metadata.childTarget ? { childTarget: metadata.childTarget } : {}),
+		requestedExposure: params.mode,
+		...(params.ttlMs === undefined ? {} : { ttlMs: params.ttlMs }),
+	};
+	const serialized = JSON.stringify(request, null, "\t");
+	if (Buffer.byteLength(serialized, "utf-8") > MAX_MESSAGE_BYTES) throw new Error("Supervisor request is too large.");
+	writeAtomicJson(requestPath(metadata.channelDir, requestId), request);
+	return {
+		content: [{ type: "text", text: "Relay exposure request queued for the delegated parent. The child did not authorize or apply it." }],
+		details: { delivered: true, requestId, requestedExposure: params.mode },
+	};
+}
+
 async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: AbortSignal): Promise<AgentToolResult<Record<string, unknown>>> {
 	const metadata = readChildMetadata();
 	if (!metadata) throw new Error("Native supervisor channel is not available for this subagent.");
@@ -290,6 +351,19 @@ function hasTool(pi: ExtensionAPI, name: string): boolean {
 export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { includeIntercomFallback?: boolean } = {}): void {
 	if (!readChildMetadata()) return;
 	const includeIntercomFallback = options.includeIntercomFallback !== false;
+	if (!hasTool(pi, NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME) && !relayExposureClientRegistered.has(pi as object)) {
+		const tool: ToolDefinition<typeof RelayExposureRequestParamsSchema, Record<string, unknown>> = {
+			name: NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME,
+			label: "Request Relay Exposure",
+			description: "Ask the exact live parent to consider promoting or demoting this child. This is advisory only; it carries no relay authority and never applies the transition itself.",
+			parameters: RelayExposureRequestParamsSchema,
+			execute(_id, params) {
+				return sendRelayExposureRequest(params as { mode: "relay" | "local"; ttlMs?: number });
+			},
+		};
+		pi.registerTool(tool);
+		relayExposureClientRegistered.add(pi as object);
+	}
 	if (!hasTool(pi, "contact_supervisor")) {
 		const tool: ToolDefinition<typeof ContactSupervisorParamsSchema, Record<string, unknown>> = {
 			name: "contact_supervisor",
@@ -326,9 +400,19 @@ function parseRequestFile(file: string, channelDir: string): PendingSupervisorRe
 		const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<SupervisorRequest>;
 		if (parsed.type !== "subagent.supervisor.request") return undefined;
 		if (typeof parsed.id !== "string" || !parsed.id) return undefined;
-		if (parsed.reason !== "need_decision" && parsed.reason !== "interview_request" && parsed.reason !== "progress_update") return undefined;
+		if (parsed.reason !== "need_decision" && parsed.reason !== "interview_request" && parsed.reason !== "progress_update" && parsed.reason !== "relay_exposure") return undefined;
 		if (typeof parsed.message !== "string" || !parsed.message) return undefined;
 		if (typeof parsed.runId !== "string" || typeof parsed.agent !== "string" || typeof parsed.childIndex !== "number") return undefined;
+		if (parsed.reason === "relay_exposure") {
+			if (Object.keys(parsed).some((field) => !RELAY_EXPOSURE_REQUEST_FIELDS.has(field))) return undefined;
+			if (parsed.expectsReply !== false) return undefined;
+			if (parsed.requestedExposure !== "relay" && parsed.requestedExposure !== "local") return undefined;
+			if (!Number.isSafeInteger(parsed.childIndex) || parsed.childIndex! < 0) return undefined;
+			if (!Number.isFinite(parsed.createdAt)) return undefined;
+			if (!parsed.runId || !parsed.agent) return undefined;
+			if (parsed.ttlMs !== undefined && (!Number.isSafeInteger(parsed.ttlMs) || parsed.ttlMs <= 0)) return undefined;
+			if (path.resolve(channelDir) !== path.resolve(resolveSupervisorChannelDir(parsed.runId, parsed.agent, parsed.childIndex!))) return undefined;
+		}
 		return { ...parsed as SupervisorRequest, channelDir, requestFile: file };
 	} catch {
 		return undefined;
@@ -646,7 +730,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 					childIndex: request.childIndex,
 				},
 			});
-			if (request.expectsReply) {
+			if (request.expectsReply || request.reason === "relay_exposure") {
 				(pi as { events?: IntercomEventBus }).events?.emit(INTERCOM_DETACH_REQUEST_EVENT, {
 					requestId: request.id,
 					runId: request.runId,

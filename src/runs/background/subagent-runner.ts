@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -87,6 +88,10 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
+import { createRelayRunnerClient, type RelayRunnerClient } from "./relay-runner-client.ts";
+import { createRelayRunnerLeaseController, relayCloseReasonForAsyncRun } from "./relay-runner-lease-controller.ts";
+import type { ConsumedRelayRunnerEnvironment } from "../shared/relay-runner-env.ts";
+import { explicitExtensionSelectionLoadsRemotePi } from "../shared/relay-exposure.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
@@ -880,6 +885,7 @@ interface SingleStepContext {
 	onAttemptStart?: (attempt: { model?: string; thinking?: string }) => void;
 	onChildEvent?: (event: ChildEvent) => void;
 	skipAcceptance?: () => boolean;
+	relayRunnerClient?: RelayRunnerClient;
 }
 
 /** Run a single pi agent step, returning output and metadata */
@@ -1045,6 +1051,25 @@ async function runSingleStep(
 				// Missing/stale structured-output files are handled after the child exits.
 			}
 		}
+		const childProcessEpoch = randomUUID();
+		let relayExposureCapability: string | undefined;
+		let relayLeaseController: ReturnType<typeof createRelayRunnerLeaseController> | undefined;
+		if (ctx.relayRunnerClient
+			&& step.requestedExposure === "relay"
+			&& step.childIdentity
+			&& explicitExtensionSelectionLoadsRemotePi(step.extensions)) {
+			const issued = await ctx.relayRunnerClient.issue({
+				runId: ctx.id,
+				workspaceId: step.childIdentity.workspaceId,
+				agentId: step.childIdentity.agentId,
+				processEpoch: childProcessEpoch,
+				mode: "relay",
+			}, 60_000);
+			if (issued.ok) {
+				relayExposureCapability = issued.capability;
+				relayLeaseController = createRelayRunnerLeaseController(ctx.relayRunnerClient, issued.lease, { ttlMs: 60_000 });
+			}
+		}
 		const watchdogConfig = resolveWatchdogConfig(step.cwd ?? ctx.cwd);
 		const childWatchdog = watchdogConfig.ok
 			? resolveChildWatchdogConfig({
@@ -1080,6 +1105,8 @@ async function runSingleStep(
 			childAgentName: step.agent,
 			childIndex: ctx.flatIndex,
 			childIdentity: step.childIdentity,
+			childProcessEpoch,
+			relayExposureCapability,
 			parentEventSink: ctx.nestedRoute?.eventSink,
 			parentControlInbox: ctx.nestedRoute?.controlInbox,
 			parentRootRunId: ctx.nestedRoute?.rootRunId,
@@ -1089,7 +1116,9 @@ async function runSingleStep(
 			toolBudget: step.toolBudget,
 			childWatchdog,
 		});
-		const run = await runPiStreaming(
+		let run: RunPiStreamingResult;
+		try {
+			run = await runPiStreaming(
 			args,
 			step.cwd ?? ctx.cwd,
 			ctx.outputFile,
@@ -1106,7 +1135,14 @@ async function runSingleStep(
 			ctx.registerStop,
 			ctx.stopMessage,
 			ctx.registerTurnBudgetAbort,
-		);
+			);
+		} catch (error) {
+			try { await relayLeaseController?.close("controlled_shutdown"); } catch { /* bounded expiry remains the backstop */ }
+			cleanupTempDir(tempDir);
+			throw error;
+		}
+		const relayCloseReason = relayCloseReasonForAsyncRun(run);
+		try { await relayLeaseController?.close(relayCloseReason); } catch { /* bounded expiry remains the backstop */ }
 		if (run.turnBudget) turnBudget = run.turnBudget;
 		else if (ctx.turnBudget) {
 			const assistantMessages = run.messages.filter((message) => message.role === "assistant");
@@ -1471,7 +1507,7 @@ function combinedAbortSignal(signals: Array<AbortSignal | undefined>): AbortSign
 	return controller.signal;
 }
 
-async function runSubagent(config: SubagentRunConfig): Promise<void> {
+async function runSubagent(config: SubagentRunConfig, relayRunnerClient?: RelayRunnerClient): Promise<void> {
 	const { id, steps, resultPath, cwd, placeholder, taskIndex, totalTasks, maxOutput, artifactsDir, artifactConfig } =
 		config;
 	const globalSemaphore = new Semaphore(config.globalConcurrencyLimit ?? DEFAULT_GLOBAL_CONCURRENCY_LIMIT);
@@ -2462,7 +2498,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const model = thinkingOverride ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
 				const thinking = thinkingOverride ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
 				return {
-					...step.parallel,
+					...task,
 					task: task.task ?? step.parallel.task,
 					label: task.label ?? step.parallel.label,
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
@@ -2598,6 +2634,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 					skipAcceptance: () => timedOut || stopped,
+					relayRunnerClient,
 				});
 				const taskEndTime = Date.now();
 				const childInterrupted = singleResult.interrupted === true;
@@ -2899,6 +2936,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 							skipAcceptance: () => timedOut || stopped,
+							relayRunnerClient,
 						});
 						if (task.sessionFile) {
 							latestSessionFile = task.sessionFile;
@@ -3106,6 +3144,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking),
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				skipAcceptance: () => timedOut || stopped,
+				relayRunnerClient,
 			});
 			if (seqStep.sessionFile) {
 				latestSessionFile = seqStep.sessionFile;
@@ -3444,9 +3483,21 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	}
 }
 
-const configArg = process.argv[2];
-if (configArg) {
+export async function startSubagentRunnerFromCommandLine(
+	authority?: ConsumedRelayRunnerEnvironment,
+): Promise<void> {
+	let relayRunnerClient: RelayRunnerClient | undefined;
+	if (authority) {
+		try {
+			relayRunnerClient = createRelayRunnerClient(authority);
+		} catch {
+			// Malformed or partial runner authority fails local-only and is never logged.
+			relayRunnerClient = undefined;
+		}
+	}
 	try {
+	const configArg = process.argv[2];
+	if (configArg) {
 		const configJson = fs.readFileSync(configArg, "utf-8");
 		const config = JSON.parse(configJson) as SubagentRunConfig;
 		try {
@@ -3454,30 +3505,19 @@ if (configArg) {
 		} catch {
 			// Temp config cleanup is best effort.
 		}
-		runSubagent(config).catch((runErr) => {
-			console.error("Subagent runner error:", runErr);
-			process.exit(1);
-		});
-	} catch (err) {
-		console.error("Subagent runner error:", err);
-		process.exit(1);
+		await runSubagent(config, relayRunnerClient);
+		return;
 	}
-} else {
-	let input = "";
-	process.stdin.setEncoding("utf-8");
-	process.stdin.on("data", (chunk) => {
-		input += chunk;
+
+	const input = await new Promise<string>((resolve, reject) => {
+		let data = "";
+		process.stdin.setEncoding("utf-8");
+		process.stdin.on("data", (chunk) => { data += chunk; });
+		process.stdin.on("end", () => resolve(data));
+		process.stdin.on("error", reject);
 	});
-	process.stdin.on("end", () => {
-		try {
-			const config = JSON.parse(input) as SubagentRunConfig;
-			runSubagent(config).catch((runErr) => {
-				console.error("Subagent runner error:", runErr);
-				process.exit(1);
-			});
-		} catch (err) {
-			console.error("Subagent runner error:", err);
-			process.exit(1);
-		}
-	});
+	await runSubagent(JSON.parse(input) as SubagentRunConfig, relayRunnerClient);
+	} finally {
+		try { await relayRunnerClient?.release(); } catch { /* bounded delegation expiry is the backstop */ }
+	}
 }

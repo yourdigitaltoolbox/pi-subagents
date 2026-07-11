@@ -421,7 +421,7 @@ describe("subagent prompt runtime", () => {
 		assert.deepEqual(registered, []);
 		handlers.get("session_start")?.({});
 		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
-		assert.deepEqual(registered, []);
+		assert.deepEqual(registered, ["request_relay_exposure"]);
 	});
 
 	it("keeps installed pi-intercom while filling only a missing child contact_supervisor tool", async () => {
@@ -442,7 +442,7 @@ describe("subagent prompt runtime", () => {
 		handlers.get("session_start")?.({});
 		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
 
-		assert.deepEqual(registered, ["contact_supervisor"]);
+		assert.deepEqual(registered, ["request_relay_exposure", "contact_supervisor"]);
 	});
 
 	it("registers native supervisor tools at runtime when pi-intercom is absent", async () => {
@@ -461,10 +461,10 @@ describe("subagent prompt runtime", () => {
 		} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
 
 		handlers.get("session_start")?.({});
-		assert.deepEqual(registered, ["contact_supervisor"]);
+		assert.deepEqual(registered, ["request_relay_exposure", "contact_supervisor"]);
 
 		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
-		assert.deepEqual(registered, ["contact_supervisor", "intercom"]);
+		assert.deepEqual(registered, ["request_relay_exposure", "contact_supervisor", "intercom"]);
 	});
 
 	it("sets the child intercom session name from env during agent startup", async () => {

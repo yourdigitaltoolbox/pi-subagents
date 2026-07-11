@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
@@ -51,6 +52,20 @@ import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { createChildRuntimeIdentity, resolveChildWorkspaceId } from "../shared/child-session-contract.ts";
+import {
+	explicitExtensionSelectionLoadsRemotePi,
+	requestRelayExposureLease,
+	type RelayExposureBinding,
+	type RelayExposureEventBus,
+	type RelayExposureLeaseMetadata,
+	type RelayExposureNormalCloseReason,
+} from "../shared/relay-exposure.ts";
+import {
+	createForegroundRelayExposureController,
+	registerForegroundRelayExposureController,
+	unregisterForegroundRelayExposureController,
+	type ForegroundRelayExposureController,
+} from "./relay-exposure-controller.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -83,6 +98,7 @@ import {
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
+const DEFAULT_RELAY_EXPOSURE_TTL_MS = 60_000;
 
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -205,6 +221,32 @@ async function runSingleAttempt(
 			childIndex: options.index ?? 0,
 		})
 		: undefined;
+	const childProcessEpoch = randomUUID();
+	let relayExposureCapability: string | undefined;
+	let relayExposureLease: RelayExposureLeaseMetadata | undefined;
+	const relayExposureEvents = options.intercomEvents as RelayExposureEventBus | undefined;
+	const relayExposureBinding: RelayExposureBinding | undefined = options.childIdentity
+		&& relayExposureEvents
+		&& explicitExtensionSelectionLoadsRemotePi(agent.extensions)
+		? {
+			runId: options.runId,
+			workspaceId: options.childIdentity.workspaceId,
+			agentId: options.childIdentity.agentId,
+			processEpoch: childProcessEpoch,
+			mode: "relay",
+		}
+		: undefined;
+	if (agent.exposure === "relay" && relayExposureBinding && relayExposureEvents) {
+		const issued = await requestRelayExposureLease(
+			relayExposureEvents,
+			relayExposureBinding,
+			{ ttlMs: DEFAULT_RELAY_EXPOSURE_TTL_MS },
+		);
+		if (issued.ok) {
+			relayExposureCapability = issued.capability;
+			relayExposureLease = issued.lease;
+		}
+	}
 	const { args, env: sharedEnv, tempDir } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
@@ -230,7 +272,9 @@ async function runSingleAttempt(
 		childAgentName: agent.name,
 		childIndex: options.index ?? 0,
 		childIdentity: options.childIdentity,
+		childProcessEpoch,
 		requestedExposure: agent.exposure,
+		relayExposureCapability,
 		parentEventSink: options.nestedRoute?.eventSink,
 		parentControlInbox: options.nestedRoute?.controlInbox,
 		parentRootRunId: options.nestedRoute?.rootRunId,
@@ -263,6 +307,23 @@ async function runSingleAttempt(
 			// Missing/stale structured-output files are handled after the child exits.
 		}
 	}
+	let relayExposureController: ForegroundRelayExposureController | undefined;
+	if (relayExposureEvents && relayExposureBinding) {
+		relayExposureController = createForegroundRelayExposureController({
+			events: relayExposureEvents,
+			binding: relayExposureBinding,
+			agent: agent.name,
+			index: options.index ?? 0,
+			parentSessionId: options.parentSessionId,
+			defaultTtlMs: DEFAULT_RELAY_EXPOSURE_TTL_MS,
+			initialLease: relayExposureLease,
+		});
+		registerForegroundRelayExposureController(relayExposureController);
+	}
+	const releaseRelayExposureController = (): void => {
+		if (!relayExposureController) return;
+		unregisterForegroundRelayExposureController(relayExposureController);
+	};
 	const controlConfig = options.controlConfig ?? DEFAULT_CONTROL_CONFIG;
 	let interruptedByControl = false;
 	const allControlEvents: ControlEvent[] = [];
@@ -303,12 +364,16 @@ async function runSingleAttempt(
 			tokens: progress.tokens,
 			durationMs: progress.durationMs,
 		};
+		try { await relayExposureController?.close("timeout"); } catch { /* bounded expiry remains the backstop */ }
+		releaseRelayExposureController();
 		return result;
 	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
 
-	const exitCode = await new Promise<number>((resolve) => {
+	let exitCode = -1;
+	try {
+		exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
 		const proc = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd: options.cwd ?? runtimeCwd,
@@ -881,7 +946,14 @@ async function runSingleAttempt(
 						// Detached children may outlive test/temp cleanup; recovered status is best-effort.
 					}
 				}
-				options.onDetachedExit?.(recoveredResult);
+				const detachedCloseReason: RelayExposureNormalCloseReason = recoveredResult.exitCode === 0 && !signal
+					? "completed"
+					: "controlled_shutdown";
+				void (async () => {
+					try { await relayExposureController?.close(detachedCloseReason); } catch { /* bounded expiry remains the backstop */ }
+					releaseRelayExposureController();
+					options.onDetachedExit?.(recoveredResult);
+				})();
 				finish(-2);
 				return;
 			}
@@ -940,7 +1012,20 @@ async function runSingleAttempt(
 				removeInterruptListener = () => options.interruptSignal?.removeEventListener("abort", interrupt);
 			}
 		}
-	});
+		});
+	} finally {
+		if (!result.detached) {
+			const closeReason: RelayExposureNormalCloseReason = result.timedOut
+				? "timeout"
+				: result.interrupted || interruptedByControl || options.interruptSignal?.aborted
+					? "interrupted"
+					: result.turnBudgetExceeded || options.signal?.aborted || exitCode !== 0
+						? "controlled_shutdown"
+						: "completed";
+			try { await relayExposureController?.close(closeReason); } catch { /* bounded expiry remains the backstop */ }
+			releaseRelayExposureController();
+		}
+	}
 	result.exitCode = exitCode;
 	if (interruptedByControl) {
 		result.exitCode = 0;
