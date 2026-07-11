@@ -20,6 +20,7 @@ export const KNOWN_FIELDS = new Set([
 	"skills",
 	"extensions",
 	"subagentOnlyExtensions",
+	"exposure",
 	"output",
 	"defaultReads",
 	"defaultProgress",
@@ -79,6 +80,9 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	if (config.subagentOnlyExtensions !== undefined || preserve("subagentOnlyExtensions")) {
 		const subagentOnlyExtensionsValue = joinComma(config.subagentOnlyExtensions);
 		lines.push(`subagentOnlyExtensions: ${subagentOnlyExtensionsValue ?? ""}`);
+	}
+	if (config.exposure !== undefined || preserve("exposure")) {
+		lines.push(`exposure: ${config.exposure ?? ""}`);
 	}
 
 	if (config.output) lines.push(`output: ${config.output}`);

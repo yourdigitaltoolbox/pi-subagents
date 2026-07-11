@@ -10,6 +10,11 @@ interface SubagentParamsSchema {
 			enum?: string[];
 			description?: string;
 		};
+		exposure?: {
+			type?: string;
+			enum?: string[];
+			description?: string;
+		};
 		tasks?: {
 			items?: {
 				properties?: {
@@ -141,7 +146,7 @@ try {
 }
 
 describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not available" : undefined }, () => {
-	it("includes context field for fresh/fork execution mode", () => {
+	it("includes context and non-authoritative exposure fields for execution mode", () => {
 		const contextSchema = SubagentParams?.properties?.context;
 		assert.ok(contextSchema, "context schema should exist");
 		assert.equal(contextSchema.type, "string");
@@ -151,6 +156,12 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(description, /fork/);
 		assert.match(description, /each requested agent/);
 		assert.match(description, /overrides every child/);
+
+		const exposureSchema = SubagentParams?.properties?.exposure;
+		assert.ok(exposureSchema, "exposure schema should exist");
+		assert.equal(exposureSchema.type, "string");
+		assert.deepEqual(exposureSchema.enum, ["off", "local", "relay"]);
+		assert.match(String(exposureSchema.description ?? ""), /non-authoritative intent/i);
 	});
 
 	it("includes count and concurrency on top-level parallel mode", () => {

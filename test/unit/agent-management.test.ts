@@ -279,10 +279,10 @@ Inspect
 		assert.match(readText(result), /config\.completionGuard must be a boolean/);
 	});
 
-	it("creates agents with subagent-only extensions", () => {
+	it("creates agents with subagent-only extensions and exposure defaults", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		const result = handleCreate(
-			{ config: { name: "child-tool-user", description: "Uses child tools", scope: "project", subagentOnlyExtensions: "./tools/child-only.ts, /opt/pi/child.ts" } },
+			{ config: { name: "child-tool-user", description: "Uses child tools", scope: "project", subagentOnlyExtensions: "./tools/child-only.ts, /opt/pi/child.ts", exposure: "local" } },
 			ctx,
 		);
 
@@ -290,10 +290,21 @@ Inspect
 		const filePath = path.join(tempDir, ".pi", "agents", "child-tool-user.md");
 		const content = fs.readFileSync(filePath, "utf-8");
 		assert.match(content, /^subagentOnlyExtensions: \.\/tools\/child-only\.ts, \/opt\/pi\/child\.ts$/m);
+		assert.match(content, /^exposure: local$/m);
 
 		const got = handleManagementAction("get", { agent: "child-tool-user" }, ctx);
 		assert.equal(got.isError, false);
 		assert.match(readText(got), /Subagent-only extensions: \.\/tools\/child-only\.ts, \/opt\/pi\/child\.ts/);
+		assert.match(readText(got), /Exposure request: local/);
+	});
+
+	it("rejects invalid exposure defaults in management config", () => {
+		const result = handleCreate(
+			{ config: { name: "unsafe-exposure", description: "Invalid", scope: "project", exposure: "phone" } },
+			{ cwd: tempDir, modelRegistry: { getAvailable: () => [] } },
+		);
+		assert.equal(result.isError, true);
+		assert.match(readText(result), /config\.exposure must be 'off', 'local', 'relay', or false/);
 	});
 
 	it("does not serialize settings overrides into custom agent frontmatter during updates", () => {

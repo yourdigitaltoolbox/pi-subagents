@@ -18,6 +18,7 @@ import { parseModelScopeConfig, type ModelScopeConfig } from "../runs/shared/mod
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 import { parseMemoryFrontmatter } from "./agent-memory.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
+import type { ChildExposureMode } from "../runs/shared/child-session-contract.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -69,6 +70,7 @@ export interface BuiltinAgentOverrideBase {
 	tools?: string[];
 	mcpDirectTools?: string[];
 	subagentOnlyExtensions?: string[];
+	exposure?: ChildExposureMode;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig;
 }
@@ -86,6 +88,7 @@ interface BuiltinAgentOverrideConfig {
 	skills?: string[] | false;
 	tools?: string[] | false;
 	subagentOnlyExtensions?: string[] | false;
+	exposure?: ChildExposureMode | false;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig | false;
 }
@@ -126,6 +129,8 @@ export interface AgentConfig {
 	skills?: string[];
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];
+	/** Default remote-pi exposure intent for this agent; never an authorization capability. */
+	exposure?: ChildExposureMode;
 	output?: string;
 	defaultReads?: string[];
 	defaultProgress?: boolean;
@@ -504,6 +509,7 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		tools: agent.tools ? [...agent.tools] : undefined,
 		mcpDirectTools: agent.mcpDirectTools ? [...agent.mcpDirectTools] : undefined,
 		subagentOnlyExtensions: agent.subagentOnlyExtensions ? [...agent.subagentOnlyExtensions] : undefined,
+		exposure: agent.exposure,
 		completionGuard: agent.completionGuard,
 		toolBudget: agent.toolBudget,
 	};
@@ -525,6 +531,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.skills !== undefined ? { skills: override.skills === false ? false : [...override.skills] } : {}),
 		...(override.tools !== undefined ? { tools: override.tools === false ? false : [...override.tools] } : {}),
 		...(override.subagentOnlyExtensions !== undefined ? { subagentOnlyExtensions: override.subagentOnlyExtensions === false ? false : [...override.subagentOnlyExtensions] } : {}),
+		...(override.exposure !== undefined ? { exposure: override.exposure } : {}),
 		...(override.completionGuard !== undefined ? { completionGuard: override.completionGuard } : {}),
 		...(override.toolBudget !== undefined ? { toolBudget: override.toolBudget === false ? false : { ...override.toolBudget, ...(Array.isArray(override.toolBudget.block) ? { block: [...override.toolBudget.block] } : {}) } } : {}),
 	};
@@ -660,6 +667,14 @@ function parseBuiltinOverrideEntry(
 			override.disabled = input.disabled;
 		} else {
 			throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'disabled'; expected a boolean.`);
+		}
+	}
+
+	if ("exposure" in input) {
+		if (input.exposure === "off" || input.exposure === "local" || input.exposure === "relay" || input.exposure === false) {
+			override.exposure = input.exposure;
+		} else {
+			throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'exposure'; expected 'off', 'local', 'relay', or false.`);
 		}
 	}
 
@@ -801,6 +816,7 @@ function applyBuiltinOverride(
 	if (override.subagentOnlyExtensions !== undefined) {
 		next.subagentOnlyExtensions = override.subagentOnlyExtensions === false ? undefined : [...override.subagentOnlyExtensions];
 	}
+	if (override.exposure !== undefined) next.exposure = override.exposure === false ? undefined : override.exposure;
 	if (override.completionGuard !== undefined) next.completionGuard = override.completionGuard;
 	if (override.toolBudget !== undefined) next.toolBudget = override.toolBudget === false ? undefined : override.toolBudget;
 
@@ -945,6 +961,9 @@ function applyCustomAgentOverride(
 			override.subagentOnlyExtensions === false ? undefined : [...override.subagentOnlyExtensions],
 		);
 	}
+	if (override.exposure !== undefined) {
+		fill("exposure", ["exposure"], override.exposure === false ? undefined : override.exposure);
+	}
 	if (override.completionGuard !== undefined) {
 		fill("completionGuard", ["completionGuard"], override.completionGuard);
 	}
@@ -981,7 +1000,7 @@ function applyCustomAgentOverrides(
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard" | "toolBudget">,
+	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "exposure" | "completionGuard" | "toolBudget">,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 
@@ -1002,6 +1021,7 @@ export function buildBuiltinOverrideConfig(
 	if (!arraysEqual(draft.subagentOnlyExtensions, base.subagentOnlyExtensions)) {
 		override.subagentOnlyExtensions = draft.subagentOnlyExtensions ? [...draft.subagentOnlyExtensions] : false;
 	}
+	if (draft.exposure !== base.exposure) override.exposure = draft.exposure ?? false;
 	if ((draft.completionGuard !== false) !== (base.completionGuard !== false)) {
 		override.completionGuard = draft.completionGuard !== false;
 	}
@@ -1264,6 +1284,15 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			defaultTurnBudget = resolved.turnBudget;
 		}
 
+		let exposure: ChildExposureMode | undefined;
+		if (frontmatter.exposure !== undefined) {
+			if (frontmatter.exposure === "off" || frontmatter.exposure === "local" || frontmatter.exposure === "relay") {
+				exposure = frontmatter.exposure;
+			} else {
+				throw new Error(`Agent '${localName}' has invalid exposure frontmatter; expected off, local, or relay.`);
+			}
+		}
+
 		let extensions: string[] | undefined;
 		if (frontmatter.extensions !== undefined) {
 			extensions = frontmatter.extensions
@@ -1322,6 +1351,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			skills: skills && skills.length > 0 ? skills : undefined,
 			extensions,
 			subagentOnlyExtensions,
+			exposure,
 			output: frontmatter.output,
 			defaultReads: defaultReads && defaultReads.length > 0 ? defaultReads : undefined,
 			defaultProgress: frontmatter.defaultProgress === "true",

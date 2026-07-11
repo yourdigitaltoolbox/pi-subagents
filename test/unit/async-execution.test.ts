@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { buildAsyncRunnerSteps, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
-const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfig => ({
+const agent = (name: string, toolBudget?: AgentConfig["toolBudget"], exposure?: AgentConfig["exposure"]): AgentConfig => ({
 	name,
 	description: `${name} agent`,
 	systemPromptMode: "replace",
@@ -14,6 +14,7 @@ const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfi
 	source: "project",
 	filePath: `${name}.md`,
 	...(toolBudget ? { toolBudget } : {}),
+	...(exposure ? { exposure } : {}),
 });
 
 const ctx = {
@@ -68,6 +69,27 @@ describe("async runner execution", () => {
 
 		assert.ok("steps" in result, "expected successful step build");
 		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 4, block: ["read"] });
+	});
+
+	it("propagates resolved agent exposure through sequential and parallel runner steps", () => {
+		const result = buildAsyncRunnerSteps("run-exposure", {
+			chain: [
+				{ agent: "worker", task: "sequential" },
+				{ parallel: [{ agent: "worker", task: "parallel" }] },
+			],
+			agents: [agent("worker", undefined, "off")],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-async-test"),
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok("steps" in result, "expected successful step build");
+		assert.equal(result.steps[0]?.requestedExposure, "off");
+		const parallel = result.steps[1];
+		assert.ok(parallel && "parallel" in parallel && Array.isArray(parallel.parallel));
+		if (parallel && "parallel" in parallel && Array.isArray(parallel.parallel)) {
+			assert.equal(parallel.parallel[0]?.requestedExposure, "off");
+		}
 	});
 
 	it("uses config default when no step, run, or agent budget exists", () => {

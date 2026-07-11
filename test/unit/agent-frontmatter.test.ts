@@ -155,18 +155,21 @@ describe("agent frontmatter launch defaults", () => {
 			defaultAsync: false,
 			defaultTimeoutMs: 90_000,
 			defaultTurnBudget: { maxTurns: 12, graceTurns: 2 },
+			exposure: "local",
 		};
 
 		const serialized = serializeAgent(agent);
 		assert.match(serialized, /^async: false$/m);
 		assert.match(serialized, /^timeoutMs: 90000$/m);
 		assert.match(serialized, /^turnBudget: \{"maxTurns":12,"graceTurns":2\}$/m);
+		assert.match(serialized, /^exposure: local$/m);
 		writeAgent(filePath, serialized);
 
 		const worker = discoverAgents(dir, "project").agents.find((candidate) => candidate.name === "worker");
 		assert.equal(worker?.defaultAsync, false);
 		assert.equal(worker?.defaultTimeoutMs, 90_000);
 		assert.deepEqual(worker?.defaultTurnBudget, { maxTurns: 12, graceTurns: 2 });
+		assert.equal(worker?.exposure, "local");
 	});
 
 	it("rejects invalid launch defaults instead of silently ignoring them", () => {
@@ -184,6 +187,23 @@ Do work
 		assert.throws(
 			() => discoverAgents(dir, "project"),
 			/Agent 'worker' has invalid async frontmatter; expected true or false/,
+		);
+	});
+
+	it("rejects invalid exposure defaults instead of treating them as relay consent", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-invalid-exposure-"));
+		tempDirs.push(dir);
+		writeAgent(path.join(dir, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+exposure: phone
+---
+
+Do work
+`);
+		assert.throws(
+			() => discoverAgents(dir, "project"),
+			/Agent 'worker' has invalid exposure frontmatter; expected off, local, or relay/,
 		);
 	});
 });

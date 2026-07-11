@@ -17,6 +17,7 @@ import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
 import { resolveModelCandidate, resolveSubagentModelOverride } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
+import type { ChildExposureMode } from "../shared/child-session-contract.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
 import {
@@ -143,6 +144,7 @@ export interface SubagentParamsLike {
 	concurrency?: number;
 	worktree?: boolean;
 	context?: "fresh" | "fork";
+	exposure?: ChildExposureMode;
 	async?: boolean;
 	timeoutMs?: number;
 	maxRuntimeMs?: number;
@@ -217,6 +219,13 @@ interface ExecutionContextData {
 
 function resolveRequestedCwd(runtimeCwd: string, requestedCwd: string | undefined): string {
 	return requestedCwd ? path.resolve(runtimeCwd, requestedCwd) : runtimeCwd;
+}
+
+function applyRequestedExposure(agents: AgentConfig[], override: ChildExposureMode | undefined): AgentConfig[] {
+	return agents.map((agent) => ({
+		...agent,
+		exposure: override ?? agent.exposure ?? "local",
+	}));
 }
 
 function getForegroundControl(state: SubagentState, runId: string | undefined) {
@@ -799,7 +808,7 @@ function appendStepToAsyncChain(input: {
 
 	const scope: AgentScope = resolveExecutionAgentScope(input.params.agentScope);
 	const discoveredForAppend = input.deps.discoverAgents(input.requestCwd, scope);
-	const agents = discoveredForAppend.agents;
+	const agents = applyRequestedExposure(discoveredForAppend.agents, input.params.exposure);
 	const contextPolicy = resolveExplicitContextPolicy(input.params);
 	const chainSkillInput = normalizeSkillInput(input.params.skill);
 	const chainSkills = chainSkillInput === false ? [] : (chainSkillInput ?? []);
@@ -1120,9 +1129,10 @@ async function resumeAsyncRun(input: {
 		context: input.params.context,
 		orchestratorTarget: sessionName,
 	});
-	const agents = intercomBridge.active
+	const bridgedAgents = intercomBridge.active
 		? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 		: discoveredAgents;
+	const agents = applyRequestedExposure(bridgedAgents, input.params.exposure);
 	const agentConfig = agents.find((agent) => agent.name === target.agent);
 	if (!agentConfig) {
 		return {
@@ -3450,9 +3460,10 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			context: effectiveParams.context,
 			orchestratorTarget: sessionName,
 		});
-		const agents = intercomBridge.active
+		const bridgedAgents = intercomBridge.active
 			? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 			: discoveredAgents;
+		const agents = applyRequestedExposure(bridgedAgents, effectiveParams.exposure);
 		const runId = randomUUID().slice(0, 8);
 		const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 		const nestedParentAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;

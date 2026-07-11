@@ -27,6 +27,7 @@ import {
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT } from "../../src/shared/types.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 import { MainWatchdogRuntime } from "../../src/watchdog/runtime.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
@@ -1334,6 +1335,35 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(mockPi.callCount(), 0);
 	});
 
+	it("blocks an incompatible configured remote-pi before spawning child Pi", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const agentDir = path.join(tempDir, "old-remote-agent-dir");
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "npm", "node_modules", "remote-pi"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:remote-pi@0.5.4"] }), "utf8");
+		fs.writeFileSync(path.join(agentDir, "npm", "node_modules", "remote-pi", "package.json"), JSON.stringify({
+			name: "remote-pi",
+			version: "0.5.4",
+			pi: { extensions: ["./dist/index.js"] },
+		}), "utf8");
+		try {
+			const executor = makeExecutor();
+			const result = await executor.execute(
+				"incompatible-remote",
+				{ agent: "echo", task: "Task" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /does not declare child-session protocol compatibility/i);
+			assert.equal(mockPi.callCount(), 0, "child Pi must not wake before compatibility passes");
+		} finally {
+			if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+		}
+	});
+
 	it("applies agent frontmatter defaults to single-agent launches", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const executor = makeExecutor([
 			makeAgent("echo", {
@@ -1356,6 +1386,35 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(typeof result.details?.asyncId, "string");
 		assert.equal(result.details?.timeoutMs, 2_000);
 		assert.deepEqual(result.details?.turnBudget, { maxTurns: 4, graceTurns: 2 });
+	});
+
+	it("lets explicit run exposure override the agent default without suppressing extensions", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const executor = makeExecutor([makeAgent("echo", { exposure: "relay" })]);
+		const inherited = await executor.execute(
+			"agent-exposure-default",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const inheritedEnv = JSON.parse(inherited.details?.results?.[0]?.finalOutput ?? "{}");
+		const inheritedDescriptor = JSON.parse(inheritedEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(inheritedDescriptor.requestedExposure, "relay");
+		assert.ok(!readCallArgs().includes("--no-extensions"));
+
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const overridden = await executor.execute(
+			"explicit-exposure",
+			{ agent: "echo", task: "Task", exposure: "off" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const overriddenEnv = JSON.parse(overridden.details?.results?.[0]?.finalOutput ?? "{}");
+		const overriddenDescriptor = JSON.parse(overriddenEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(overriddenDescriptor.requestedExposure, "off");
+		assert.ok(!readCallArgs().includes("--no-extensions"));
 	});
 
 	it("lets agent frontmatter override the global async default", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

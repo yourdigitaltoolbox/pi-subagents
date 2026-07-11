@@ -17,6 +17,7 @@ import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMin
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest } from "../../src/runs/background/control-channel.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 
 interface AsyncExecutionResult {
 	content: Array<{ text?: string }>;
@@ -346,6 +347,36 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	it("reports jiti availability as boolean", () => {
 		const result = isAsyncAvailable();
 		assert.equal(typeof result, "boolean");
+	});
+
+	it("emits the child descriptor from the detached async runner", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const id = `async-descriptor-${Date.now().toString(36)}`;
+		const result = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Inspect descriptor",
+			agentConfig: makeAgent("worker", { exposure: "off" }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+		assert.equal(result.isError, undefined);
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf8")) as AsyncResultPayload;
+		const env = JSON.parse(payload.results[0]?.output ?? "{}");
+		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(descriptor.requestedExposure, "off");
+		const args = await waitForMockPiArgs(mockPi, 0);
+		assert.ok(!args.includes("--no-extensions"));
 	});
 
 	it("spawns the async runner with node when process.execPath is not node", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

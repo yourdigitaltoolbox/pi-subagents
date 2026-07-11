@@ -263,6 +263,10 @@ const SubagentParamsSchema = Type.Object({
 		enum: ["fresh", "fork"],
 		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
 	})),
+	exposure: Type.Optional(Type.String({
+		enum: ["off", "local", "relay"],
+		description: "Requested remote-pi exposure for every child in this invocation. This is non-authoritative intent; relay still requires separate authorization. Overrides agent frontmatter; defaults to local.",
+	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs. Alias of maxRuntimeMs." })),

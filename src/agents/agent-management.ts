@@ -215,6 +215,7 @@ function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		tools: base.tools ? [...base.tools] : undefined,
 		mcpDirectTools: base.mcpDirectTools ? [...base.mcpDirectTools] : undefined,
 		subagentOnlyExtensions: base.subagentOnlyExtensions ? [...base.subagentOnlyExtensions] : undefined,
+		exposure: base.exposure,
 		completionGuard: base.completionGuard,
 		override: undefined,
 	};
@@ -245,6 +246,7 @@ function preservedAgentFrontmatterFields(agent: AgentConfig, cfg: Record<string,
 	if (hasKey(cfg, "skills")) changed("skill", "skills");
 	if (hasKey(cfg, "extensions")) changed("extensions");
 	if (hasKey(cfg, "subagentOnlyExtensions")) changed("subagentOnlyExtensions");
+	if (hasKey(cfg, "exposure")) changed("exposure");
 	if (hasKey(cfg, "thinking")) {
 		changed("thinking");
 		if (cfg.thinking === "off") fields.add("thinking");
@@ -399,6 +401,11 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		else if (typeof cfg.subagentOnlyExtensions === "string") target.subagentOnlyExtensions = parseCsv(cfg.subagentOnlyExtensions);
 		else return "config.subagentOnlyExtensions must be a comma-separated string, empty string, or false when provided.";
 	}
+	if (hasKey(cfg, "exposure")) {
+		if (cfg.exposure === false || cfg.exposure === "") target.exposure = undefined;
+		else if (cfg.exposure === "off" || cfg.exposure === "local" || cfg.exposure === "relay") target.exposure = cfg.exposure;
+		else return "config.exposure must be 'off', 'local', 'relay', or false when provided.";
+	}
 	if (hasKey(cfg, "thinking")) {
 		if (cfg.thinking === false || cfg.thinking === "") target.thinking = undefined;
 		else if (typeof cfg.thinking === "string") target.thinking = cfg.thinking.trim() || undefined;
@@ -541,6 +548,7 @@ function formatAgentDetail(agent: AgentConfig): string {
 	if (agent.source === "builtin") lines.push(`Disabled: ${agent.disabled ? "true" : "false"}`);
 	if (agent.extensions !== undefined) lines.push(`Extensions: ${agent.extensions.length ? agent.extensions.join(", ") : "(none)"}`);
 	if (agent.subagentOnlyExtensions !== undefined) lines.push(`Subagent-only extensions: ${agent.subagentOnlyExtensions.length ? agent.subagentOnlyExtensions.join(", ") : "(none)"}`);
+	if (agent.exposure !== undefined) lines.push(`Exposure request: ${agent.exposure}`);
 	if (agent.thinking) lines.push(`Thinking: ${agent.thinking}`);
 	if (agent.output) lines.push(`Output: ${agent.output}`);
 	if (agent.defaultReads?.length) lines.push(`Reads: ${agent.defaultReads.join(", ")}`);

@@ -8,6 +8,14 @@ import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./s
 import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
 import { TOOL_BUDGET_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV, encodeChildWatchdogConfig, type ChildWatchdogConfig } from "../../watchdog/child-status.ts";
+import {
+	CHILD_SESSION_DESCRIPTOR_ENV,
+	createChildSessionDescriptor,
+	encodeChildSessionDescriptor,
+	loadPiSubagentsPackageIdentity,
+	type ChildExposureMode,
+} from "./child-session-contract.ts";
+import { preflightRemotePiCompatibility, type RemotePiCompatibility } from "./remote-pi-compat.ts";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const TASK_ARG_LIMIT = 8000;
@@ -57,6 +65,10 @@ interface BuildPiArgsInput {
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
+	parentAgentId?: string;
+	requestedExposure?: ChildExposureMode;
+	/** Optional tested compatibility result; production launches preflight when omitted. */
+	remotePiCompatibility?: RemotePiCompatibility;
 	parentEventSink?: string;
 	parentControlInbox?: string;
 	parentRootRunId?: string;
@@ -87,6 +99,17 @@ function sanitizeSupervisorChannelSegment(value: string): string {
 
 function supervisorChannelDir(runId: string, agent: string, childIndex: number): string {
 	return path.join(TEMP_ROOT_DIR, "supervisor-channels", `${sanitizeSupervisorChannelSegment(runId)}-${sanitizeSupervisorChannelSegment(agent)}-${childIndex}`);
+}
+
+function inheritedParentAgentId(): string | undefined {
+	const raw = process.env[CHILD_SESSION_DESCRIPTOR_ENV];
+	if (!raw) return undefined;
+	try {
+		const parsed = JSON.parse(raw) as { agentId?: unknown };
+		return typeof parsed.agentId === "string" ? parsed.agentId : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export function applyThinkingSuffix(model: string | undefined, thinking: string | false | undefined, replaceExisting = false): string | undefined {
@@ -180,6 +203,21 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 
 	const env: Record<string, string | undefined> = {};
 	env[SUBAGENT_CHILD_ENV] = "1";
+	if (input.runId && input.childAgentName) {
+		const remotePiCompatibility = input.remotePiCompatibility
+			?? preflightRemotePiCompatibility({ cwd: input.cwd });
+		const descriptor = createChildSessionDescriptor({
+			runId: input.runId,
+			childAgentName: input.childAgentName,
+			childIndex: input.childIndex ?? 0,
+			parentSessionId: input.parentSessionId,
+			parentAgentId: input.parentAgentId ?? inheritedParentAgentId(),
+			requestedExposure: input.requestedExposure,
+			producer: loadPiSubagentsPackageIdentity(),
+			remotePi: remotePiCompatibility,
+		});
+		env[CHILD_SESSION_DESCRIPTOR_ENV] = encodeChildSessionDescriptor(descriptor);
+	}
 	env[SUBAGENT_FANOUT_CHILD_ENV] = fanoutAuthorized ? "1" : "0";
 	const inheritedNestedRoute = Boolean(process.env[SUBAGENT_PARENT_EVENT_SINK_ENV] && process.env[SUBAGENT_PARENT_ROOT_RUN_ID_ENV] && process.env[SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV]);
 	const parentRunId = input.parentRunId ?? input.runId ?? (inheritedNestedRoute ? process.env[SUBAGENT_RUN_ID_ENV] : undefined) ?? process.env[SUBAGENT_PARENT_RUN_ID_ENV] ?? "";

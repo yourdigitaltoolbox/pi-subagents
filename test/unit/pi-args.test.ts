@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import { computeMcpServerHash } from "../../src/runs/shared/mcp-direct-tool-allowlist.ts";
 import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV } from "../../src/watchdog/child-status.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
 	SUBAGENT_PARENT_CHILD_INDEX_ENV,
@@ -28,6 +29,7 @@ const originalEnv = {
 	HOME: process.env.HOME,
 	USERPROFILE: process.env.USERPROFILE,
 	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+	PI_SUBAGENT_DESCRIPTOR: process.env.PI_SUBAGENT_DESCRIPTOR,
 	PI_SUBAGENT_FANOUT_CHILD: process.env.PI_SUBAGENT_FANOUT_CHILD,
 	PI_SUBAGENT_PARENT_EVENT_SINK: process.env.PI_SUBAGENT_PARENT_EVENT_SINK,
 	PI_SUBAGENT_PARENT_CONTROL_INBOX: process.env.PI_SUBAGENT_PARENT_CONTROL_INBOX,
@@ -796,6 +798,7 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		process.env[SUBAGENT_PARENT_DEPTH_ENV] = "1";
 		process.env[SUBAGENT_PARENT_PATH_ENV] = JSON.stringify([{ runId: "root-run", stepIndex: 0 }]);
 		process.env[SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV] = "inherited-token";
+		process.env[CHILD_SESSION_DESCRIPTOR_ENV] = JSON.stringify({ agentId: "66666666-6666-5666-8666-666666666666" });
 
 		const { env } = buildPiArgs({
 			baseArgs: ["-p"],
@@ -805,13 +808,19 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			inheritSkills: false,
 			tools: ["subagent"],
 			runId: "current-nested-run",
+			childAgentName: "nested-worker",
 			childIndex: 2,
+			remotePiCompatibility: { state: "absent" },
 		});
 
 		assert.equal(env[SUBAGENT_PARENT_RUN_ID_ENV], "current-nested-run");
 		assert.equal(env[SUBAGENT_PARENT_CHILD_INDEX_ENV], "2");
 		assert.equal(env[SUBAGENT_PARENT_DEPTH_ENV], "2");
-		assert.deepEqual(JSON.parse(env[SUBAGENT_PARENT_PATH_ENV] ?? "[]"), [{ runId: "root-run", stepIndex: 0 }, { runId: "current-nested-run", stepIndex: 2 }]);
+		assert.deepEqual(JSON.parse(env[SUBAGENT_PARENT_PATH_ENV] ?? "[]"), [{ runId: "root-run", stepIndex: 0 }, { runId: "current-nested-run", stepIndex: 2, agent: "nested-worker" }]);
+		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(descriptor.runId, "current-nested-run");
+		assert.equal(descriptor.index, 2);
+		assert.equal(descriptor.parentAgentId, "66666666-6666-5666-8666-666666666666");
 	});
 
 	it("does not let direct MCP tools authorize child fanout", () => {
@@ -854,6 +863,67 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(env[SUBAGENT_FANOUT_CHILD_ENV], "1");
 		assert.ok(extensionArgs.some((arg) => arg.endsWith(path.join("src", "extension", "fanout-child.ts"))));
 		assert.ok(extensionArgs.includes("./agent-allowed-ext.ts"));
+	});
+
+	it("emits a v1 child descriptor without suppressing inherited extensions", () => {
+		const first = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			runId: "descriptor-run",
+			childAgentName: "reviewer",
+			childIndex: 3,
+			parentSessionId: "parent-session",
+			requestedExposure: "relay",
+			remotePiCompatibility: { state: "absent" },
+		});
+		const second = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			runId: "descriptor-run",
+			childAgentName: "reviewer",
+			childIndex: 3,
+			requestedExposure: "relay",
+			remotePiCompatibility: { state: "absent" },
+		});
+
+		assert.ok(!first.args.includes("--no-extensions"));
+		const descriptor = JSON.parse(first.env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		const nextDescriptor = JSON.parse(second.env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(descriptor.version, 1);
+		assert.equal(descriptor.requestedExposure, "relay");
+		assert.equal(descriptor.parentSessionId, "parent-session");
+		assert.equal(descriptor.index, 3);
+		assert.equal(descriptor.agentId, nextDescriptor.agentId);
+		assert.notEqual(descriptor.processEpoch, nextDescriptor.processEpoch);
+		assert.equal(descriptor.compatibility.remotePi.state, "absent");
+		assert.equal(descriptor.producer.name, "pi-subagents");
+	});
+
+	it("fails compatibility preflight before returning spawn arguments for an old configured remote-pi", () => {
+		const fixture = createMcpFixture();
+		writeJson(path.join(fixture.agentDir, "settings.json"), { packages: ["npm:remote-pi@0.5.4"] });
+		writeJson(path.join(fixture.agentDir, "npm", "node_modules", "remote-pi", "package.json"), {
+			name: "remote-pi",
+			version: "0.5.4",
+			pi: { extensions: ["./dist/index.js"] },
+		});
+
+		assert.throws(() => buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			cwd: fixture.projectDir,
+			runId: "blocked-run",
+			childAgentName: "worker",
+		}), /does not declare child-session protocol compatibility/i);
 	});
 
 	it("emits an empty prompt file when replace mode is used with an empty prompt", () => {

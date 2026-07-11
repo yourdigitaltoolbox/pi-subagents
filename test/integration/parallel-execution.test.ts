@@ -23,6 +23,7 @@ import {
 	removeTempDir,
 	tryImport,
 } from "../support/helpers.ts";
+import { CHILD_SESSION_DESCRIPTOR_ENV } from "../../src/runs/shared/child-session-contract.ts";
 
 // Top-level await: try importing pi-dependent modules
 const utils = await tryImport<any>("./src/shared/utils.ts");
@@ -189,6 +190,23 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 			assert.equal(result.details?.mode, "parallel");
 			assert.match(result.content[0]?.text ?? "", new RegExp(`${action} alias finished`));
 		}
+	});
+
+	it("emits the child descriptor for top-level parallel tasks", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV] });
+		const executor = makeExecutor([makeAgent("echo", { exposure: "relay" })]);
+		const result = await executor.execute(
+			"parallel-descriptor",
+			{ tasks: [{ agent: "echo", task: "Inspect descriptor" }], exposure: "local" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(result.isError, undefined);
+		const env = JSON.parse(result.details?.results?.[0]?.finalOutput ?? "{}");
+		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(descriptor.requestedExposure, "local");
+		assert.ok(!readLastCallArgs().includes("--no-extensions"));
 	});
 
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
