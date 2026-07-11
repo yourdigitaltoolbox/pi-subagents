@@ -21,7 +21,7 @@ describe("child session contract", () => {
 		const raw = fs.readFileSync(packagePath, "utf8");
 		assert.deepEqual(loadPiSubagentsPackageIdentity(), {
 			name: "pi-subagents",
-			version: "0.34.0",
+			version: "0.34.1",
 			manifestSha256: createHash("sha256").update(raw).digest("hex"),
 		});
 	});
