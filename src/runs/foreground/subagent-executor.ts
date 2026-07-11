@@ -23,6 +23,7 @@ import {
 	resolveChildWorkspaceId,
 	validateChildRuntimeIdentity,
 	validateChildWorkspaceId,
+	type ChildExposureIntentSource,
 	type ChildExposureMode,
 	type ChildRuntimeIdentity,
 } from "../shared/child-session-contract.ts";
@@ -246,7 +247,24 @@ function applyRequestedExposure(agents: AgentConfig[], override: ChildExposureMo
 	return agents.map((agent) => ({
 		...agent,
 		exposure: override ?? agent.exposure ?? "local",
+		exposureIntentSource: override !== undefined
+			? "run"
+			: agent.exposure !== undefined
+				? "agent"
+				: "fallback",
 	}));
+}
+
+function applyResumeExposure(
+	agents: AgentConfig[],
+	override: ChildExposureMode | undefined,
+	target: { agent: string; requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource },
+): AgentConfig[] {
+	const resolved = applyRequestedExposure(agents, override);
+	if (override !== undefined || target.requestedExposure === undefined || target.requestedExposureSource === undefined) return resolved;
+	return resolved.map((agent) => agent.name === target.agent
+		? { ...agent, exposure: target.requestedExposure, exposureIntentSource: target.requestedExposureSource }
+		: agent);
 }
 
 function getForegroundControl(state: SubagentState, runId: string | undefined) {
@@ -403,6 +421,8 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				index,
 				...(result.workspaceId ? { workspaceId: result.workspaceId } : {}),
 				...(result.agentId ? { agentId: result.agentId } : {}),
+				...(result.requestedExposure ? { requestedExposure: result.requestedExposure } : {}),
+				...(result.requestedExposureSource ? { requestedExposureSource: result.requestedExposureSource } : {}),
 				status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
 				updatedAt,
 				...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
@@ -440,6 +460,8 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		index: input.index,
 		...(input.result.workspaceId ? { workspaceId: input.result.workspaceId } : {}),
 		...(input.result.agentId ? { agentId: input.result.agentId } : {}),
+		...(input.result.requestedExposure ? { requestedExposure: input.result.requestedExposure } : {}),
+		...(input.result.requestedExposureSource ? { requestedExposureSource: input.result.requestedExposureSource } : {}),
 		status: resolveSubagentResultStatus({ exitCode: input.result.exitCode, interrupted: input.result.interrupted, detached: false }),
 		updatedAt,
 		...(input.result.exitCode !== undefined ? { exitCode: input.result.exitCode } : {}),
@@ -457,7 +479,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 	persistRememberedForegroundRuns(state);
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; childIdentity: ChildRuntimeIdentity } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; childIdentity: ChildRuntimeIdentity; requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size) return undefined;
 	const direct = state.foregroundRuns.get(requested);
@@ -481,7 +503,20 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	const childIdentity = child.workspaceId && child.agentId
 		? validateChildRuntimeIdentity({ workspaceId: child.workspaceId, agentId: child.agentId })
 		: createChildRuntimeIdentity(resolveChildWorkspaceId(run.cwd));
-	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile, childIdentity };
+	return {
+		runId: run.runId,
+		mode: run.mode,
+		state: "complete",
+		agent: child.agent,
+		index,
+		intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index),
+		cwd: run.cwd,
+		sessionFile,
+		childIdentity,
+		...(child.requestedExposure && child.requestedExposureSource
+			? { requestedExposure: child.requestedExposure, requestedExposureSource: child.requestedExposureSource }
+			: {}),
+	};
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
@@ -1215,7 +1250,7 @@ async function resumeAsyncRun(input: {
 	const bridgedAgents = intercomBridge.active
 		? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 		: discoveredAgents;
-	const agents = applyRequestedExposure(bridgedAgents, input.params.exposure);
+	const agents = applyResumeExposure(bridgedAgents, input.params.exposure, target);
 	const agentConfig = agents.find((agent) => agent.name === target.agent);
 	if (!agentConfig) {
 		return {

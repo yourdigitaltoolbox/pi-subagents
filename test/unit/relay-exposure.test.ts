@@ -7,6 +7,7 @@ import {
 	promoteRelayExposureLease,
 	renewRelayExposureLease,
 	requestRelayExposureLease,
+	relayIntentMayNeedAuthority,
 	revokeRelayExposureLease,
 	RELAY_EXPOSURE_REQUEST_EVENT,
 	relayExposureReplyEvent,
@@ -38,6 +39,14 @@ class Events implements RelayExposureEventBus {
 }
 
 describe("relay exposure parent RPC", () => {
+	it("requests authority for explicit relay or unresolved remote-policy fallback only", () => {
+		assert.equal(relayIntentMayNeedAuthority("relay", "run"), true);
+		assert.equal(relayIntentMayNeedAuthority("relay", "agent"), true);
+		assert.equal(relayIntentMayNeedAuthority("local", "fallback"), true);
+		assert.equal(relayIntentMayNeedAuthority("local", "run"), false);
+		assert.equal(relayIntentMayNeedAuthority("off", "fallback"), false);
+	});
+
 	it("recognizes remote-pi only when an explicit extension allowlist actually selects it", () => {
 		assert.equal(explicitExtensionSelectionLoadsRemotePi(undefined), true);
 		assert.equal(explicitExtensionSelectionLoadsRemotePi([]), false);
@@ -73,6 +82,7 @@ describe("relay exposure parent RPC", () => {
 			delegationTtlMs: 60_000,
 			maxLeaseTtlMs: 30_000,
 			maxChildIssues: 4,
+			intentSources: ["agent", "fallback"],
 			timeoutMs: 50,
 			now: () => now,
 		});
@@ -87,6 +97,7 @@ describe("relay exposure parent RPC", () => {
 			delegationTtlMs: observed.delegationTtlMs,
 			maxLeaseTtlMs: observed.maxLeaseTtlMs,
 			maxChildIssues: observed.maxChildIssues,
+			intentSources: observed.intentSources,
 			hasCapability: "capability" in observed,
 		}, {
 			method: "delegate_runner",
@@ -95,6 +106,7 @@ describe("relay exposure parent RPC", () => {
 			delegationTtlMs: 60_000,
 			maxLeaseTtlMs: 30_000,
 			maxChildIssues: 4,
+			intentSources: ["agent", "fallback"],
 			hasCapability: false,
 		});
 	});
@@ -133,8 +145,10 @@ describe("relay exposure parent RPC", () => {
 	it("requests one process-bound capability and returns only validated issuance data", async () => {
 		const events = new Events();
 		const issuedAt = Date.now();
+		let observedIntentSource: unknown;
 		events.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
-			const request = raw as { requestId: string };
+			const request = raw as { requestId: string; intentSource?: unknown };
+			observedIntentSource = request.intentSource;
 			events.emit(relayExposureReplyEvent(request.requestId), {
 				version: 1,
 				requestId: request.requestId,
@@ -155,10 +169,11 @@ describe("relay exposure parent RPC", () => {
 			});
 		});
 
-		const result = await requestRelayExposureLease(events, BINDING, { ttlMs: 30_000, timeoutMs: 50 });
+		const result = await requestRelayExposureLease(events, BINDING, { ttlMs: 30_000, intentSource: "agent", timeoutMs: 50 });
 		assert.equal(result.ok, true);
 		if (!result.ok) return;
 		assert.match(result.capability, /^rpel1\./);
+		assert.equal(observedIntentSource, "agent");
 		assert.deepEqual(result.lease.binding, BINDING);
 	});
 

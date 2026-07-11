@@ -216,6 +216,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
 		assert.equal(descriptor.version, 1);
 		assert.equal(descriptor.requestedExposure, "local");
+		assert.equal(descriptor.intentSource, "agent");
 		assert.ok(!readCallArgs(0).includes("--no-extensions"));
 	});
 

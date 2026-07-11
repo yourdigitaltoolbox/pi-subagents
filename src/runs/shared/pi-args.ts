@@ -13,6 +13,7 @@ import {
 	createChildSessionDescriptor,
 	encodeChildSessionDescriptor,
 	loadPiSubagentsPackageIdentity,
+	type ChildExposureIntentSource,
 	type ChildExposureMode,
 	type ChildRuntimeIdentity,
 } from "./child-session-contract.ts";
@@ -76,6 +77,7 @@ interface BuildPiArgsInput {
 	childProcessEpoch?: string;
 	parentAgentId?: string;
 	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	relayExposureCapability?: string;
 	/** Optional tested compatibility result; production launches preflight when omitted. */
 	remotePiCompatibility?: RemotePiCompatibility;
@@ -225,6 +227,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 			parentSessionId: input.parentSessionId,
 			parentAgentId: input.parentAgentId ?? inheritedParentAgentId(),
 			requestedExposure: input.requestedExposure,
+			intentSource: input.requestedExposureSource,
 			producer: loadPiSubagentsPackageIdentity(),
 			remotePi: remotePiCompatibility,
 		});

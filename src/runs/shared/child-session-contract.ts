@@ -7,6 +7,7 @@ export const CHILD_SESSION_DESCRIPTOR_ENV = "PI_SUBAGENT_DESCRIPTOR";
 export const CHILD_SESSION_PROTOCOL_VERSION = 1 as const;
 
 export type ChildExposureMode = "off" | "local" | "relay";
+export type ChildExposureIntentSource = "run" | "agent" | "fallback";
 
 export interface PackageIdentity {
 	name: "pi-subagents";
@@ -45,6 +46,7 @@ export interface ChildSessionDescriptorV1 {
 	parentAgentId?: string;
 	index: number;
 	requestedExposure: ChildExposureMode;
+	intentSource: ChildExposureIntentSource;
 	producer: PackageIdentity & { protocolVersion: 1 };
 	compatibility: {
 		remotePi: RemotePiCompatibilityDescriptor;
@@ -59,6 +61,7 @@ export interface CreateChildSessionDescriptorInput {
 	parentAgentId?: string;
 	identity?: ChildRuntimeIdentity;
 	requestedExposure?: ChildExposureMode;
+	intentSource?: ChildExposureIntentSource;
 	processEpoch?: string;
 	producer: PackageIdentity;
 	remotePi: RemotePiCompatibilityDescriptor;
@@ -67,6 +70,7 @@ export interface CreateChildSessionDescriptorInput {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const EXPOSURE_MODES = new Set<ChildExposureMode>(["off", "local", "relay"]);
+const INTENT_SOURCES = new Set<ChildExposureIntentSource>(["run", "agent", "fallback"]);
 
 export function createChildRuntimeIdentity(workspaceId = randomUUID(), generateUuid: () => string = randomUUID): ChildRuntimeIdentity {
 	return validateChildRuntimeIdentity({ workspaceId, agentId: generateUuid() });
@@ -153,10 +157,14 @@ function workspaceIdFromProtectedConfig(cwd: string): string | undefined {
 			|| namedFile.dev !== fileStat.dev || namedFile.ino !== fileStat.ino) return undefined;
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-		const allowedKeys = new Set(["schema_version", "revision", "workspace_id", "agent_name", "auto_start_relay"]);
+		const allowedKeys = new Set(["schema_version", "revision", "workspace_id", "agent_name", "auto_start_relay", "child_exposure"]);
 		if (Object.keys(parsed).some((key) => !allowedKeys.has(key) || /(secret|token|capability|credential|password|nonce|lease)/i.test(key))) return undefined;
 		if (parsed["agent_name"] !== undefined && typeof parsed["agent_name"] !== "string") return undefined;
 		if (parsed["auto_start_relay"] !== undefined && typeof parsed["auto_start_relay"] !== "boolean") return undefined;
+		if (parsed["child_exposure"] !== undefined
+			&& parsed["child_exposure"] !== "off"
+			&& parsed["child_exposure"] !== "local"
+			&& parsed["child_exposure"] !== "relay") return undefined;
 		const rawName = parsed["agent_name"];
 		if (typeof rawName === "string" && (!rawName.trim() || /[\\/]/.test(rawName) || /#\d+$/.test(rawName) || /[\u0000-\u001f\u007f]/.test(rawName))) return undefined;
 		const revision = parsed["revision"];
@@ -286,6 +294,10 @@ export function createChildSessionDescriptor(input: CreateChildSessionDescriptor
 	if (!EXPOSURE_MODES.has(requestedExposure)) {
 		throw new Error("Child session requestedExposure must be off, local, or relay.");
 	}
+	const intentSource = input.intentSource ?? "fallback";
+	if (!INTENT_SOURCES.has(intentSource)) {
+		throw new Error("Child session intentSource must be run, agent, or fallback.");
+	}
 	const fallbackAgentId = stableChildAgentId(runId, childAgentName, childIndex);
 	const identity = validateChildRuntimeIdentity(input.identity ?? {
 		workspaceId: stableChildAgentId(runId, "workspace", 0),
@@ -325,6 +337,7 @@ export function createChildSessionDescriptor(input: CreateChildSessionDescriptor
 			: {}),
 		index: childIndex,
 		requestedExposure,
+		intentSource,
 		producer: {
 			name: "pi-subagents",
 			version: producerVersion,

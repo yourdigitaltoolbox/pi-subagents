@@ -8,7 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
-import type { ChildRuntimeIdentity } from "../runs/shared/child-session-contract.ts";
+import type { ChildExposureIntentSource, ChildExposureMode, ChildRuntimeIdentity } from "../runs/shared/child-session-contract.ts";
 
 // ============================================================================
 // Basic Types
@@ -475,6 +475,8 @@ export interface SingleResult {
 	task: string;
 	workspaceId?: string;
 	agentId?: string;
+	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	exitCode: number;
 	detached?: boolean;
 	detachedReason?: string;
@@ -740,6 +742,8 @@ export interface AsyncStatus {
 		agent: string;
 		workspaceId?: string;
 		agentId?: string;
+		requestedExposure?: ChildExposureMode;
+		requestedExposureSource?: ChildExposureIntentSource;
 		phase?: string;
 		label?: string;
 		outputName?: string;
@@ -849,6 +853,8 @@ export interface ForegroundResumeChild {
 	index: number;
 	workspaceId?: string;
 	agentId?: string;
+	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	sessionFile?: string;
 	status: SubagentResultStatus;
 	exitCode?: number;

@@ -18,7 +18,7 @@ import { parseModelScopeConfig, type ModelScopeConfig } from "../runs/shared/mod
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 import { parseMemoryFrontmatter } from "./agent-memory.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
-import type { ChildExposureMode } from "../runs/shared/child-session-contract.ts";
+import type { ChildExposureIntentSource, ChildExposureMode } from "../runs/shared/child-session-contract.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -131,6 +131,8 @@ export interface AgentConfig {
 	subagentOnlyExtensions?: string[];
 	/** Default remote-pi exposure intent for this agent; never an authorization capability. */
 	exposure?: ChildExposureMode;
+	/** Runtime-only winning source after run overrides are applied. */
+	exposureIntentSource?: ChildExposureIntentSource;
 	output?: string;
 	defaultReads?: string[];
 	defaultProgress?: boolean;

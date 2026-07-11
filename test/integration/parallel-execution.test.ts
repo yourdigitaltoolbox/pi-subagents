@@ -212,6 +212,7 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		});
 		assert.equal(descriptors.length, 2);
 		assert.equal(descriptors[0].requestedExposure, "local");
+		assert.equal(descriptors[0].intentSource, "run");
 		assert.equal(descriptors[0].workspaceId, descriptors[1].workspaceId);
 		assert.notEqual(descriptors[0].agentId, descriptors[1].agentId);
 		assert.ok(!readLastCallArgs().includes("--no-extensions"));

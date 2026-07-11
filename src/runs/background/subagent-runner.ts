@@ -91,7 +91,7 @@ import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { createRelayRunnerClient, type RelayRunnerClient } from "./relay-runner-client.ts";
 import { createRelayRunnerLeaseController, relayCloseReasonForAsyncRun } from "./relay-runner-lease-controller.ts";
 import type { ConsumedRelayRunnerEnvironment } from "../shared/relay-runner-env.ts";
-import { explicitExtensionSelectionLoadsRemotePi } from "../shared/relay-exposure.ts";
+import { explicitExtensionSelectionLoadsRemotePi, relayIntentMayNeedAuthority } from "../shared/relay-exposure.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
@@ -151,6 +151,8 @@ interface StepResult {
 	output: string;
 	workspaceId?: string;
 	agentId?: string;
+	requestedExposure?: "off" | "local" | "relay";
+	requestedExposureSource?: "run" | "agent" | "fallback";
 	error?: string;
 	success: boolean;
 	exitCode?: number | null;
@@ -1052,10 +1054,11 @@ async function runSingleStep(
 			}
 		}
 		const childProcessEpoch = randomUUID();
+		const requestedExposureSource = step.requestedExposureSource ?? (step.requestedExposure !== undefined ? "agent" : "fallback");
 		let relayExposureCapability: string | undefined;
 		let relayLeaseController: ReturnType<typeof createRelayRunnerLeaseController> | undefined;
 		if (ctx.relayRunnerClient
-			&& step.requestedExposure === "relay"
+			&& relayIntentMayNeedAuthority(step.requestedExposure, requestedExposureSource)
 			&& step.childIdentity
 			&& explicitExtensionSelectionLoadsRemotePi(step.extensions)) {
 			const issued = await ctx.relayRunnerClient.issue({
@@ -1064,7 +1067,7 @@ async function runSingleStep(
 				agentId: step.childIdentity.agentId,
 				processEpoch: childProcessEpoch,
 				mode: "relay",
-			}, 60_000);
+			}, 60_000, requestedExposureSource);
 			if (issued.ok) {
 				relayExposureCapability = issued.capability;
 				relayLeaseController = createRelayRunnerLeaseController(ctx.relayRunnerClient, issued.lease, { ttlMs: 60_000 });
@@ -1094,6 +1097,7 @@ async function runSingleStep(
 			extensions: step.extensions,
 			subagentOnlyExtensions: step.subagentOnlyExtensions,
 			requestedExposure: step.requestedExposure,
+			requestedExposureSource,
 			systemPrompt: appendTurnBudgetSystemPrompt(step.systemPrompt ?? "", ctx.turnBudget),
 			systemPromptMode: step.systemPromptMode,
 			mcpDirectTools: step.mcpDirectTools,
@@ -1319,6 +1323,8 @@ async function runSingleStep(
 		agent: step.agent,
 		output: outputForSummary,
 		...(step.childIdentity ? { workspaceId: step.childIdentity.workspaceId, agentId: step.childIdentity.agentId } : {}),
+		...(step.requestedExposure ? { requestedExposure: step.requestedExposure } : {}),
+		...(step.requestedExposureSource ? { requestedExposureSource: step.requestedExposureSource } : {}),
 		exitCode: effectiveFinalExitCode,
 		error: effectiveFinalError,
 		sessionFile: step.sessionFile,
@@ -1555,6 +1561,8 @@ async function runSubagent(config: SubagentRunConfig, relayRunnerClient?: RelayR
 				initialStatusSteps.push({
 					agent: task.agent,
 					...(task.childIdentity ? { workspaceId: task.childIdentity.workspaceId, agentId: task.childIdentity.agentId } : {}),
+					...(task.requestedExposure ? { requestedExposure: task.requestedExposure } : {}),
+					...(task.requestedExposureSource ? { requestedExposureSource: task.requestedExposureSource } : {}),
 					phase: task.phase,
 					label: task.label,
 					outputName: task.outputName,
@@ -1592,6 +1600,8 @@ async function runSubagent(config: SubagentRunConfig, relayRunnerClient?: RelayR
 			initialStatusSteps.push({
 				agent: step.agent,
 				...(step.childIdentity ? { workspaceId: step.childIdentity.workspaceId, agentId: step.childIdentity.agentId } : {}),
+				...(step.requestedExposure ? { requestedExposure: step.requestedExposure } : {}),
+				...(step.requestedExposureSource ? { requestedExposureSource: step.requestedExposureSource } : {}),
 				phase: step.phase,
 				label: step.label,
 				outputName: step.outputName,
@@ -2517,6 +2527,8 @@ async function runSubagent(config: SubagentRunConfig, relayRunnerClient?: RelayR
 				return {
 					agent: task.agent,
 					...(task.childIdentity ? { workspaceId: task.childIdentity.workspaceId, agentId: task.childIdentity.agentId } : {}),
+					...(task.requestedExposure ? { requestedExposure: task.requestedExposure } : {}),
+					...(task.requestedExposureSource ? { requestedExposureSource: task.requestedExposureSource } : {}),
 					phase: task.phase ?? step.phase,
 					label: task.label,
 					outputName: undefined,
@@ -3430,6 +3442,8 @@ async function runSubagent(config: SubagentRunConfig, relayRunnerClient?: RelayR
 				agent: r.agent,
 				...(r.workspaceId ? { workspaceId: r.workspaceId } : {}),
 				...(r.agentId ? { agentId: r.agentId } : {}),
+				...(r.requestedExposure ? { requestedExposure: r.requestedExposure } : {}),
+				...(r.requestedExposureSource ? { requestedExposureSource: r.requestedExposureSource } : {}),
 				output: r.output,
 				error: r.error,
 				success: r.success,

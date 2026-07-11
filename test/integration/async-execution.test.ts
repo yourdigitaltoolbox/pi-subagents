@@ -345,12 +345,12 @@ function readMockPiArgsMatching(mockPi: MockPi, text: string): string[] {
 
 async function createRelayRunnerHarness(root: string): Promise<{
 	eventBus: ReturnType<typeof createEventBus>;
-	delegations: Array<{ rootRunId: string; token: string }>;
+	delegations: Array<{ rootRunId: string; token: string; intentSources: unknown }>;
 	requests: Array<Record<string, unknown>>;
 	close(): Promise<void>;
 }> {
 	const socketPath = path.join(root, "relay-runner-harness.sock");
-	const delegations: Array<{ rootRunId: string; token: string }> = [];
+	const delegations: Array<{ rootRunId: string; token: string; intentSources: unknown }> = [];
 	const requests: Array<Record<string, unknown>> = [];
 	const leases = new Map<string, Record<string, unknown>>();
 	let issueCount = 0;
@@ -410,7 +410,7 @@ async function createRelayRunnerHarness(root: string): Promise<{
 		if (request.method !== "delegate_runner") return;
 		const delegationId = randomUUID();
 		const token = `rprd1.${delegationId}.${"a".repeat(43)}`;
-		delegations.push({ rootRunId: request.rootRunId as string, token });
+		delegations.push({ rootRunId: request.rootRunId as string, token, intentSources: request.intentSources });
 		eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
 			version: 1,
 			requestId: request.requestId,
@@ -483,6 +483,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const env = JSON.parse(payload.results[0]?.output ?? "{}");
 		const descriptor = JSON.parse(env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
 		assert.equal(descriptor.requestedExposure, "off");
+		assert.equal(descriptor.intentSource, "agent");
 		const args = await waitForMockPiArgs(mockPi, 0);
 		assert.ok(!args.includes("--no-extensions"));
 	});
@@ -496,6 +497,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const childCapability = `rpel1.${leaseId}.${"b".repeat(43)}`;
 		const socketPath = path.join(tempDir, "relay-broker.sock");
 		const requests: Array<Record<string, unknown>> = [];
+		let delegationIntentSources: unknown;
 		let issuedLease: Record<string, unknown> | undefined;
 		const server = createServer((socket) => {
 			socket.setEncoding("utf8");
@@ -541,6 +543,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
 				const request = raw as Record<string, unknown>;
 				if (request.method !== "delegate_runner") return;
+				delegationIntentSources = request.intentSources;
 				eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
 					version: 1,
 					requestId: request.requestId,
@@ -583,6 +586,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const call = await waitForMockPiCall(mockPi, 0);
 			const descriptor = JSON.parse(call.childDescriptor ?? "null") as Record<string, unknown>;
 			assert.equal(descriptor.processEpoch, binding.processEpoch);
+			assert.equal(descriptor.intentSource, "agent");
+			assert.deepEqual(delegationIntentSources, ["agent"]);
 			assert.equal(call.relayExposureCapabilityPresent, true);
 			assert.equal(call.relayRunnerDelegationPresent, false);
 			assert.equal(call.relayRunnerSocketPresent, false);
@@ -600,12 +605,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("reuses one in-memory runner token for static, dynamic, and appended relay children", { skip: !isAsyncAvailable() || !executeAsyncChainWithRelay || !createSubagentExecutor ? "jiti, relay wrapper, or executor not available" : undefined }, async () => {
+	it("reuses one source-fenced runner token across static, dynamic, fallback, and appended children", { skip: !isAsyncAvailable() || !executeAsyncChainWithRelay || !createSubagentExecutor ? "jiti, relay wrapper, or executor not available" : undefined }, async () => {
 		mockPi.onCall({ output: "static-a" });
 		mockPi.onCall({ output: "static-b" });
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
 		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
+		mockPi.onCall({ output: "fallback denied" });
 		mockPi.onCall({ delay: 1_000, output: "tail" });
 		mockPi.onCall({ output: "appended" });
 		const id = `async-relay-chain-${Date.now().toString(36)}`;
@@ -626,6 +632,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				requests.push(request);
 				const base = { type: "relay_runner_result", version: 1, requestId: request.requestId, ok: true };
 				if (request.type === "relay_runner_issue") {
+					if (request.intentSource === "fallback") {
+						socket.end(`${JSON.stringify({ ...base, ok: false, reason: "runner_intent_source_denied" })}\n`);
+						return;
+					}
 					issueCounter++;
 					const suffix = String(issueCounter).padStart(12, "0");
 					const leaseId = `55555555-5555-4555-8555-${suffix}`;
@@ -668,6 +678,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
 				const request = raw as Record<string, unknown>;
 				if (request.method !== "delegate_runner") return;
+				assert.deepEqual(request.intentSources, ["agent", "fallback"]);
 				eventBus.emit(relayExposureReplyEvent(request.requestId as string), {
 					version: 1,
 					requestId: request.requestId,
@@ -684,6 +695,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				makeAgent("static", { exposure: "relay" }),
 				makeAgent("producer", { exposure: "local" }),
 				makeAgent("reviewer", { exposure: "relay" }),
+				makeAgent("fallback", { exposure: "local", exposureIntentSource: "fallback" }),
 				makeAgent("tail", { exposure: "local" }),
 				makeAgent("appended", { exposure: "relay" }),
 			];
@@ -698,6 +710,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 						collect: { as: "reviews" },
 						concurrency: 1,
 					},
+					{ agent: "fallback", task: "Remote policy must decide" },
 					{ agent: "tail", task: "Keep runner alive" },
 				],
 				agents,
@@ -708,7 +721,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				maxSubagentDepth: 2,
 			});
 			assert.equal(launched.isError, undefined);
-			await waitForMockPiCall(mockPi, 5, 15_000);
+			await waitForMockPiCall(mockPi, 6, 15_000);
 			const executor = createSubagentExecutor!({
 				pi: { events: eventBus, getSessionName: () => undefined },
 				state: { baseCwd: tempDir, currentSessionId: "session-relay-chain", asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
@@ -732,24 +745,25 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			while (!requests.some((request) => request.type === "relay_runner_release") && Date.now() < deadline) {
 				await new Promise((resolve) => setTimeout(resolve, 20));
 			}
-			const capabilityStates = await Promise.all(Array.from({ length: 7 }, async (_, index) =>
+			const capabilityStates = await Promise.all(Array.from({ length: 8 }, async (_, index) =>
 				(await waitForMockPiCall(mockPi, index)).relayExposureCapabilityPresent));
-			assert.deepEqual(capabilityStates, [true, true, false, true, true, false, true]);
-			assert.equal(requests.filter((request) => request.type === "relay_runner_issue").length, 5);
+			assert.deepEqual(capabilityStates, [true, true, false, true, true, false, false, true]);
+			assert.deepEqual(requests.filter((request) => request.type === "relay_runner_issue").map((request) => request.intentSource), ["agent", "agent", "agent", "agent", "fallback", "agent"]);
+			assert.equal(requests.filter((request) => request.type === "relay_runner_issue").length, 6);
 			assert.equal(requests.filter((request) => request.type === "relay_runner_close").length, 5);
 			assert.equal(requests.filter((request) => request.type === "relay_runner_release").length, 1);
 			assert.ok(requests.every((request) => request.token === token));
 			const epochs = requests
 				.filter((request) => request.type === "relay_runner_issue")
 				.map((request) => (request.binding as Record<string, unknown>).processEpoch);
-			assert.equal(new Set(epochs).size, 5);
-			for (const index of [0, 1, 3, 4, 6]) {
+			assert.equal(new Set(epochs).size, 6);
+			for (const index of [0, 1, 3, 4, 7]) {
 				const call = await waitForMockPiCall(mockPi, index);
 				assert.equal(call.relayExposureCapabilityPresent, true);
 				assert.equal(call.relayRunnerDelegationPresent, false);
 				assert.equal(call.relayRunnerSocketPresent, false);
 			}
-			for (const index of [2, 5]) {
+			for (const index of [2, 5, 6]) {
 				const call = await waitForMockPiCall(mockPi, index);
 				assert.equal(call.relayExposureCapabilityPresent, false);
 			}
@@ -778,7 +792,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const localSessionFile = path.join(tempDir, "local-resume.jsonl");
 		const harness = await createRelayRunnerHarness(tempDir);
 		const createdRunIds: string[] = [relaySourceId, localSourceId];
-		const writeCompletedSource = (runId: string, sessionFile: string) => {
+		const writeCompletedSource = (
+			runId: string,
+			sessionFile: string,
+			requestedExposure: "local" | "relay",
+			requestedExposureSource: "run" | "agent",
+		) => {
 			fs.writeFileSync(sessionFile, "", "utf8");
 			const asyncDir = path.join(ASYNC_DIR, runId);
 			fs.mkdirSync(asyncDir, { recursive: true });
@@ -799,12 +818,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 					agentId,
 					// Safe prior lifecycle metadata must not become revive authority.
 					processEpoch: priorProcessEpoch,
+					requestedExposure,
+					requestedExposureSource,
 					relayExposureLeaseId: priorLeaseId,
 				}],
 			}, null, 2), "utf8");
 		};
-		writeCompletedSource(relaySourceId, relaySessionFile);
-		writeCompletedSource(localSourceId, localSessionFile);
+		writeCompletedSource(relaySourceId, relaySessionFile, "relay", "run");
+		writeCompletedSource(localSourceId, localSessionFile, "local", "agent");
 		try {
 			const makeResumeExecutor = (agent: ReturnType<typeof makeAgent>) => createSubagentExecutor!({
 				pi: { events: harness.eventBus, getSessionName: () => undefined },
@@ -817,7 +838,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				discoverAgents: () => ({ agents: [agent] }),
 			});
 
-			const relayResume = await makeResumeExecutor(makeAgent("worker", { exposure: "relay" })).execute(
+			const relayResume = await makeResumeExecutor(makeAgent("worker", { exposure: "local" })).execute(
 				"resume-relay",
 				{ action: "resume", id: relaySourceId, message: "Continue with current relay policy" },
 				new AbortController().signal,
@@ -830,20 +851,23 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			createdRunIds.push(relayRevivedId);
 			await waitForAsyncResultFile(relayRevivedId, 30_000);
 			const relayCall = await waitForMockPiCall(mockPi, 0);
-			const relayDescriptor = JSON.parse(relayCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+			const relayDescriptor = JSON.parse(relayCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string };
 			assert.equal(relayDescriptor.workspaceId, workspaceId);
 			assert.equal(relayDescriptor.agentId, agentId);
 			assert.notEqual(relayDescriptor.processEpoch, priorProcessEpoch);
 			assert.equal(relayCall.relayExposureCapabilityPresent, true);
+			assert.equal(relayDescriptor.requestedExposure, "relay");
+			assert.equal(relayDescriptor.intentSource, "run");
 			assert.equal(harness.delegations.length, 1);
 			assert.equal(harness.delegations[0]?.rootRunId, relayRevivedId);
+			assert.deepEqual(harness.delegations[0]?.intentSources, ["run"]);
 			const relayIssue = harness.requests.find((request) => request.type === "relay_runner_issue");
 			assert.ok(relayIssue, "expected fresh relay issue for revived process");
 			assert.equal(relayIssue.token, harness.delegations[0]?.token);
 			assert.equal((relayIssue.binding as Record<string, unknown>).agentId, agentId);
 			assert.equal((relayIssue.binding as Record<string, unknown>).processEpoch, relayDescriptor.processEpoch);
 
-			const localResume = await makeResumeExecutor(makeAgent("worker", { exposure: "local" })).execute(
+			const localResume = await makeResumeExecutor(makeAgent("worker", { exposure: "relay" })).execute(
 				"resume-local",
 				{ action: "resume", id: localSourceId, message: "Continue under current local policy" },
 				new AbortController().signal,
@@ -856,16 +880,60 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			createdRunIds.push(localRevivedId);
 			await waitForAsyncResultFile(localRevivedId, 30_000);
 			const localCall = await waitForMockPiCall(mockPi, 1);
-			const localDescriptor = JSON.parse(localCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+			const localDescriptor = JSON.parse(localCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string };
 			assert.equal(localDescriptor.workspaceId, workspaceId);
 			assert.equal(localDescriptor.agentId, agentId);
 			assert.notEqual(localDescriptor.processEpoch, priorProcessEpoch);
 			assert.notEqual(localDescriptor.processEpoch, relayDescriptor.processEpoch);
+			assert.equal(localDescriptor.requestedExposure, "local");
+			assert.equal(localDescriptor.intentSource, "agent");
 			assert.equal(localCall.relayExposureCapabilityPresent, false);
 			assert.equal(harness.delegations.length, 1, "prior live promotion must not survive current local policy");
 		} finally {
 			await harness.close();
 			for (const runId of createdRunIds) {
+				fs.rmSync(path.join(ASYNC_DIR, runId), { recursive: true, force: true });
+				fs.rmSync(path.join(RESULTS_DIR, `${runId}.json`), { force: true });
+			}
+		}
+	});
+
+	it("carries unresolved remote-policy fallback through async delegation and child launch", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		mockPi.onCall({ output: "fallback-policy child done" });
+		const harness = await createRelayRunnerHarness(tempDir);
+		let runId: string | undefined;
+		try {
+			const executor = createSubagentExecutor!({
+				pi: { events: harness.eventBus, getSessionName: () => undefined },
+				state: { baseCwd: tempDir, currentSessionId: "fallback-parent", asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+				config: {},
+				asyncByDefault: false,
+				tempArtifactsDir: tempDir,
+				getSubagentSessionRoot: () => tempDir,
+				expandTilde: (value: string) => value,
+				discoverAgents: () => ({ agents: [makeAgent("worker")] }),
+			});
+			const launched = await executor.execute(
+				"fallback-async",
+				{ agent: "worker", task: "Use remote policy", async: true },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(launched.isError, undefined, JSON.stringify(launched.content));
+			runId = launched.details?.asyncId;
+			assert.ok(runId, "expected async fallback run id");
+			await waitForAsyncResultFile(runId, 30_000);
+			assert.equal(harness.delegations.length, 1);
+			assert.deepEqual(harness.delegations[0]?.intentSources, ["fallback"]);
+			const call = await waitForMockPiCall(mockPi, 0);
+			const descriptor = JSON.parse(call.childDescriptor ?? "null") as Record<string, unknown>;
+			assert.equal(descriptor.requestedExposure, "local");
+			assert.equal(descriptor.intentSource, "fallback");
+			assert.equal(call.relayExposureCapabilityPresent, true);
+		} finally {
+			await harness.close();
+			if (runId) {
 				fs.rmSync(path.join(ASYNC_DIR, runId), { recursive: true, force: true });
 				fs.rmSync(path.join(RESULTS_DIR, `${runId}.json`), { force: true });
 			}

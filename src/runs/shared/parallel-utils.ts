@@ -1,4 +1,4 @@
-import type { ChildExposureMode, ChildRuntimeIdentity } from "./child-session-contract.ts";
+import type { ChildExposureIntentSource, ChildExposureMode, ChildRuntimeIdentity } from "./child-session-contract.ts";
 
 export interface RunnerSubagentStep {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
@@ -24,6 +24,7 @@ export interface RunnerSubagentStep {
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];
 	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	mcpDirectTools?: string[];
 	completionGuard?: boolean;
 	systemPrompt?: string | null;

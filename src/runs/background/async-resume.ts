@@ -4,7 +4,7 @@ import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SubagentState } from "..
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
-import { createChildRuntimeIdentity, resolveChildWorkspaceId, validateChildRuntimeIdentity, validateChildWorkspaceId, type ChildRuntimeIdentity } from "../shared/child-session-contract.ts";
+import { createChildRuntimeIdentity, resolveChildWorkspaceId, validateChildRuntimeIdentity, validateChildWorkspaceId, type ChildExposureIntentSource, type ChildExposureMode, type ChildRuntimeIdentity } from "../shared/child-session-contract.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
@@ -38,6 +38,8 @@ export type AsyncResumeTarget = {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
+	requestedExposure?: ChildExposureMode;
+	requestedExposureSource?: ChildExposureIntentSource;
 	childIdentity: ChildRuntimeIdentity;
 };
 
@@ -90,7 +92,7 @@ interface AsyncResultFile {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string; workspaceId?: string; agentId?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string; workspaceId?: string; agentId?: string; requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource }>;
 }
 
 export interface AsyncRunLocation {
@@ -117,6 +119,28 @@ function validateOptionalString(value: Record<string, unknown>, field: string, s
 	return fieldValue;
 }
 
+function validateExposureIntent(
+	mode: unknown,
+	source: unknown,
+	label: string,
+): { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource } {
+	if ((mode === undefined) !== (source === undefined)) throw new Error(`${label} has incomplete exposure intent.`);
+	if (mode === undefined) return {};
+	if (mode !== "off" && mode !== "local" && mode !== "relay") throw new Error(`${label}.requestedExposure must be off, local, or relay.`);
+	if (source !== "run" && source !== "agent" && source !== "fallback") throw new Error(`${label}.requestedExposureSource must be run, agent, or fallback.`);
+	return { requestedExposure: mode, requestedExposureSource: source };
+}
+
+function exposureIntentsConflict(
+	left: { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource },
+	right: { requestedExposure?: ChildExposureMode; requestedExposureSource?: ChildExposureIntentSource },
+): boolean {
+	return left.requestedExposure !== undefined
+		&& right.requestedExposure !== undefined
+		&& (left.requestedExposure !== right.requestedExposure
+			|| left.requestedExposureSource !== right.requestedExposureSource);
+}
+
 function validateResultFile(value: unknown, resultPath: string): AsyncResultFile {
 	const data = ensureObject(value, resultPath);
 	const resultsValue = data.results;
@@ -132,9 +156,10 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const thinking = validateOptionalString(child, "thinking", resultPath, `results[${index}].thinking`);
 			const workspaceId = validateOptionalString(child, "workspaceId", resultPath, `results[${index}].workspaceId`);
 			const agentId = validateOptionalString(child, "agentId", resultPath, `results[${index}].agentId`);
+			const exposureIntent = validateExposureIntent(child.requestedExposure, child.requestedExposureSource, `Invalid async result file '${resultPath}': results[${index}]`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, model, thinking, workspaceId, agentId, ...(typeof success === "boolean" ? { success } : {}) };
+			return { agent, sessionFile, intercomTarget, model, thinking, workspaceId, agentId, ...exposureIntent, ...(typeof success === "boolean" ? { success } : {}) };
 		});
 	}
 	const success = data.success;
@@ -288,6 +313,7 @@ function validateStatusForResume(status: AsyncStatus | null, source: string): vo
 			if (stepRecord.thinking !== undefined && typeof stepRecord.thinking !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].thinking must be a string.`);
 			if (stepRecord.workspaceId !== undefined && typeof stepRecord.workspaceId !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].workspaceId must be a string.`);
 			if (stepRecord.agentId !== undefined && typeof stepRecord.agentId !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].agentId must be a string.`);
+			validateExposureIntent(stepRecord.requestedExposure, stepRecord.requestedExposureSource, `Invalid async status '${source}': steps[${index}]`);
 			if ((stepRecord.workspaceId === undefined) !== (stepRecord.agentId === undefined)) throw new Error(`Invalid async status '${source}': steps[${index}] has incomplete child identity.`);
 			if (typeof stepRecord.workspaceId === "string" && typeof stepRecord.agentId === "string") {
 				validateChildRuntimeIdentity({ workspaceId: stepRecord.workspaceId, agentId: stepRecord.agentId });
@@ -366,6 +392,9 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 					sessionFile: selectedStep.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
 					model: selectedStep.model,
 					thinking: selectedStep.thinking,
+					...(selectedStep.requestedExposure && selectedStep.requestedExposureSource
+						? { requestedExposure: selectedStep.requestedExposure, requestedExposureSource: selectedStep.requestedExposureSource }
+						: {}),
 					childIdentity: resolvePersistedIdentity(selectedStep.workspaceId, selectedStep.agentId, `Async run '${runId}' child ${requestedIndex}`, fallbackWorkspaceId),
 				};
 			}
@@ -391,6 +420,9 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 				sessionFile: selected.step.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
 				model: selected.step.model,
 				thinking: selected.step.thinking,
+				...(selected.step.requestedExposure && selected.step.requestedExposureSource
+					? { requestedExposure: selected.step.requestedExposure, requestedExposureSource: selected.step.requestedExposureSource }
+					: {}),
 				childIdentity: resolvePersistedIdentity(selected.step.workspaceId, selected.step.agentId, `Async run '${runId}' child ${selected.index}`, fallbackWorkspaceId),
 			};
 		}
@@ -411,6 +443,27 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
 	const stepModel = statusSteps[index]?.model ?? resultSteps[index]?.model ?? (stepCount === 1 ? result?.model : undefined);
 	const stepThinking = statusSteps[index]?.thinking ?? resultSteps[index]?.thinking ?? (stepCount === 1 ? result?.thinking : undefined);
+	const statusExposureIntent = validateExposureIntent(
+		statusSteps[index]?.requestedExposure,
+		statusSteps[index]?.requestedExposureSource,
+		`Async run '${runId}' child ${index} status`,
+	);
+	const resultExposureIntent = validateExposureIntent(
+		resultSteps[index]?.requestedExposure,
+		resultSteps[index]?.requestedExposureSource,
+		`Async run '${runId}' child ${index} result`,
+	);
+	if (exposureIntentsConflict(statusExposureIntent, resultExposureIntent)) {
+		throw new Error(`Async run '${runId}' child ${index} has conflicting durable exposure intent.`);
+	}
+	// These files retain non-secret parent-requested intent, not authority. A
+	// revive still rotates processEpoch and needs fresh live remote-pi parent
+	// authorization/current policy. Same-UID malicious file editing is outside
+	// the documented local threat boundary; cooperative record disagreement is
+	// detected above rather than silently preferring one valid pair.
+	const exposureIntent = statusExposureIntent.requestedExposure !== undefined
+		? statusExposureIntent
+		: resultExposureIntent;
 	const workspaceId = statusSteps[index]?.workspaceId ?? resultSteps[index]?.workspaceId;
 	const agentId = statusSteps[index]?.agentId ?? resultSteps[index]?.agentId;
 	const childIdentity = resolvePersistedIdentity(workspaceId, agentId, `Async run '${runId}' child ${index}`, fallbackWorkspaceId);
@@ -428,6 +481,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
 		...(stepModel ? { model: stepModel } : {}),
 		...(stepThinking ? { thinking: stepThinking } : {}),
+		...exposureIntent,
 	};
 }
 

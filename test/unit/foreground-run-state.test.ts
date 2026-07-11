@@ -34,6 +34,8 @@ describe("foreground resume state", () => {
 				status: "completed",
 				workspaceId: "11111111-1111-4111-8111-111111111111",
 				agentId: "22222222-2222-4222-8222-222222222222",
+				requestedExposure: "relay",
+				requestedExposureSource: "run",
 				sessionFile: "/sessions/run-1234/session.jsonl",
 				updatedAt: 100,
 				finalOutput: "must not persist",
@@ -61,6 +63,8 @@ describe("foreground resume state", () => {
 				status: "completed",
 				workspaceId: "11111111-1111-4111-8111-111111111111",
 				agentId: "22222222-2222-4222-8222-222222222222",
+				requestedExposure: "relay",
+				requestedExposureSource: "run",
 				sessionFile: "/sessions/run-1234/session.jsonl",
 				updatedAt: 100,
 			}],
@@ -86,5 +90,17 @@ describe("foreground resume state", () => {
 			}],
 		}), "utf8");
 		assert.equal(loadForegroundResumeRuns(file).size, 0);
+
+		fs.writeFileSync(file, JSON.stringify({
+			version: 1,
+			runs: [{
+				runId: "run-exposure",
+				mode: "single",
+				cwd: "/workspace",
+				updatedAt: 100,
+				children: [{ agent: "worker", index: 0, status: "completed", requestedExposure: "relay" }],
+			}],
+		}), "utf8");
+		assert.equal(loadForegroundResumeRuns(file).size, 0, "partial exposure intent must fail closed");
 	});
 });

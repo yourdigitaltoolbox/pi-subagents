@@ -115,11 +115,23 @@ describe("async runner execution", () => {
 
 		assert.ok("steps" in result, "expected successful step build");
 		assert.equal(result.steps[0]?.requestedExposure, "off");
+		assert.equal(result.steps[0]?.requestedExposureSource, "agent");
 		const parallel = result.steps[1];
 		assert.ok(parallel && "parallel" in parallel && Array.isArray(parallel.parallel));
 		if (parallel && "parallel" in parallel && Array.isArray(parallel.parallel)) {
 			assert.equal(parallel.parallel[0]?.requestedExposure, "off");
+			assert.equal(parallel.parallel[0]?.requestedExposureSource, "agent");
 		}
+		const fallback = buildAsyncRunnerSteps("run-fallback", {
+			chain: [{ agent: "worker", task: "remote policy decides" }],
+			agents: [agent("worker")],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-async-test"),
+			maxSubagentDepth: 2,
+		});
+		assert.ok("steps" in fallback, "expected fallback step build");
+		assert.equal(fallback.steps[0]?.requestedExposure, "local");
+		assert.equal(fallback.steps[0]?.requestedExposureSource, "fallback");
 	});
 
 	it("shares one workspaceId across children while allocating distinct agentIds", () => {

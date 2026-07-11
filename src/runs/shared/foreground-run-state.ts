@@ -41,6 +41,14 @@ function parseChild(value: unknown): ForegroundResumeChild | undefined {
 	}
 	const sessionFile = raw.sessionFile === undefined ? undefined : boundedString(raw.sessionFile, 4096);
 	if (raw.sessionFile !== undefined && (!sessionFile || !path.isAbsolute(sessionFile) || path.extname(sessionFile) !== ".jsonl")) return undefined;
+	const requestedExposure = raw.requestedExposure;
+	if (requestedExposure !== undefined && requestedExposure !== "off" && requestedExposure !== "local" && requestedExposure !== "relay") return undefined;
+	const requestedExposureSource = raw.requestedExposureSource;
+	if (requestedExposureSource !== undefined
+		&& requestedExposureSource !== "run"
+		&& requestedExposureSource !== "agent"
+		&& requestedExposureSource !== "fallback") return undefined;
+	if ((requestedExposure === undefined) !== (requestedExposureSource === undefined)) return undefined;
 	const updatedAt = raw.updatedAt === undefined ? undefined : finiteTimestamp(raw.updatedAt);
 	if (raw.updatedAt !== undefined && updatedAt === undefined) return undefined;
 	const exitCode = raw.exitCode === undefined
@@ -53,6 +61,9 @@ function parseChild(value: unknown): ForegroundResumeChild | undefined {
 		status: status as ForegroundResumeChild["status"],
 		...(identity ?? {}),
 		...(sessionFile ? { sessionFile } : {}),
+		...(requestedExposure !== undefined && requestedExposureSource !== undefined
+			? { requestedExposure, requestedExposureSource }
+			: {}),
 		...(updatedAt !== undefined ? { updatedAt } : {}),
 		...(exitCode !== undefined ? { exitCode } : {}),
 	};
@@ -79,9 +90,10 @@ function parseRun(value: unknown): ForegroundResumeRun | undefined {
 
 /**
  * Load the minimal foreground-resume ledger associated with one parent Pi
- * session. The ledger intentionally excludes task text, model output,
- * capabilities, and process epochs; it retains only routing identity and the
- * child session file required for an explicit revive.
+ * session. This parent-owned ledger intentionally excludes task text, model
+ * output, capabilities, and process epochs; it retains only routing identity,
+ * non-authoritative launch intent, and the child session file required for an
+ * explicit revive. Revive rotates processEpoch and reacquires live authority.
  */
 export function loadForegroundResumeRuns(filePath: string): Map<string, ForegroundResumeRun> {
 	let parsed: unknown;
@@ -110,6 +122,9 @@ function minimalRun(run: ForegroundResumeRun): ForegroundResumeRun {
 			status: child.status,
 			...(child.workspaceId && child.agentId ? { workspaceId: child.workspaceId, agentId: child.agentId } : {}),
 			...(child.sessionFile ? { sessionFile: child.sessionFile } : {}),
+			...(child.requestedExposure && child.requestedExposureSource
+				? { requestedExposure: child.requestedExposure, requestedExposureSource: child.requestedExposureSource }
+				: {}),
 			...(child.updatedAt !== undefined ? { updatedAt: child.updatedAt } : {}),
 			...(child.exitCode !== undefined ? { exitCode: child.exitCode } : {}),
 		})),

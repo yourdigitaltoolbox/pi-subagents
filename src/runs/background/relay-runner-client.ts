@@ -5,6 +5,7 @@ import type {
 	RelayExposureLeaseMetadata,
 	RelayExposureNormalCloseReason,
 } from "../shared/relay-exposure.ts";
+import type { ChildExposureIntentSource } from "../shared/child-session-contract.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RUNNER_TOKEN_PATTERN = /^rprd1\.([0-9a-f-]{36})\.[A-Za-z0-9_-]{43}$/;
@@ -25,6 +26,7 @@ const FAILURE_REASONS = new Set([
 	"invalid_runner_delegation",
 	"runner_delegation_expired",
 	"runner_issue_capacity_exceeded",
+	"runner_intent_source_denied",
 	"ttl_exceeds_runner_maximum",
 	"runner_lease_not_owned",
 	"runner_binding_mismatch",
@@ -55,7 +57,7 @@ export type RelayRunnerLifecycleResult =
 export type RelayRunnerReleaseResult = { ok: true; state: "released" } | Failure;
 
 export interface RelayRunnerClient {
-	issue(binding: RelayExposureBinding, ttlMs: number): Promise<RelayRunnerIssueResult>;
+	issue(binding: RelayExposureBinding, ttlMs: number, intentSource: ChildExposureIntentSource): Promise<RelayRunnerIssueResult>;
 	renew(lease: RelayExposureLeaseMetadata, ttlMs: number, renewalId?: string): Promise<RelayRunnerLifecycleResult>;
 	revoke(lease: RelayExposureLeaseMetadata): Promise<RelayRunnerLifecycleResult>;
 	close(lease: RelayExposureLeaseMetadata, reason: RelayExposureNormalCloseReason): Promise<RelayRunnerLifecycleResult>;
@@ -243,9 +245,14 @@ export function createRelayRunnerClient(options: { token: string; socketPath: st
 	};
 
 	return {
-		issue(binding, ttlMs) {
-			if (!validBinding(binding) || !Number.isSafeInteger(ttlMs) || ttlMs <= 0) return Promise.resolve({ ok: false, reason: "invalid_request" });
-			return request("issue", { type: "relay_runner_issue", binding: { ...binding }, ttlMs }, binding) as Promise<RelayRunnerIssueResult>;
+		issue(binding, ttlMs, intentSource) {
+			if (!validBinding(binding)
+				|| !Number.isSafeInteger(ttlMs)
+				|| ttlMs <= 0
+				|| (intentSource !== "run" && intentSource !== "agent" && intentSource !== "fallback")) {
+				return Promise.resolve({ ok: false, reason: "invalid_request" });
+			}
+			return request("issue", { type: "relay_runner_issue", binding: { ...binding }, ttlMs, intentSource }, binding) as Promise<RelayRunnerIssueResult>;
 		},
 		renew(lease, ttlMs, renewalId = randomUUID()) {
 			if (!validLease(lease, lease.binding, lease.relayExposureLeaseId)

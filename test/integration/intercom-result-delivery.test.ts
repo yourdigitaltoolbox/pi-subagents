@@ -590,17 +590,22 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		mockPi.onCall({ output: "first child done" });
 		mockPi.onCall({ output: "second child done" });
 		mockPi.onCall({ output: "revived foreground answer" });
-		const { executor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a"), makeAgent("b")] });
+		const agentA = makeAgent("a", { exposure: "local" });
+		const agentB = makeAgent("b", { exposure: "local" });
+		const { executor } = makeExecutor({ bridgeMode: "off", agents: [agentA, agentB] });
 
 		const original = await executor.execute(
 			"foreground-resume-original",
-			{ tasks: [{ agent: "a", task: "task-a" }, { agent: "b", task: "task-b" }] },
+			{ tasks: [{ agent: "a", task: "task-a" }, { agent: "b", task: "task-b" }], exposure: "relay" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 		const runId = original.details?.runId;
 		assert.ok(runId, "expected foreground run id");
+		// Changing the current agent default must not rewrite the original explicit
+		// per-run intent when resume does not supply a new override.
+		agentB.exposure = "off";
 
 		const revived = await executor.execute(
 			"foreground-resume",
@@ -631,13 +636,21 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		const revivedResult = JSON.parse(fs.readFileSync(resultPath, "utf8")) as { results?: Array<{ workspaceId?: string; agentId?: string }> };
 		assert.equal(revivedResult.results?.[0]?.workspaceId, selectedChild.workspaceId);
 		assert.equal(revivedResult.results?.[0]?.agentId, selectedChild.agentId);
-		const originalCall = await readMockCall(1);
+		// Parallel children may reach the mock in either order. Select the original
+		// descriptor by the stable logical child ID rather than call position.
+		const originalDescriptors = await Promise.all([readMockCall(0), readMockCall(1)])
+			.then((calls) => calls.map((call) => JSON.parse(call.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string }));
+		const originalDescriptor = originalDescriptors.find((descriptor) => descriptor.agentId === selectedChild.agentId);
+		assert.ok(originalDescriptor, "expected original descriptor for selected logical child");
 		const revivedCall = await readMockCall(2);
-		const originalDescriptor = JSON.parse(originalCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
-		const revivedDescriptor = JSON.parse(revivedCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string };
+		const revivedDescriptor = JSON.parse(revivedCall.childDescriptor ?? "null") as { workspaceId?: string; agentId?: string; processEpoch?: string; requestedExposure?: string; intentSource?: string };
 		assert.equal(revivedDescriptor.workspaceId, originalDescriptor.workspaceId);
 		assert.equal(revivedDescriptor.agentId, originalDescriptor.agentId);
 		assert.notEqual(revivedDescriptor.processEpoch, originalDescriptor.processEpoch);
+		assert.equal(originalDescriptor.requestedExposure, "relay");
+		assert.equal(originalDescriptor.intentSource, "run");
+		assert.equal(revivedDescriptor.requestedExposure, "relay");
+		assert.equal(revivedDescriptor.intentSource, "run");
 	});
 
 	it("resume restores a completed foreground child's identity after parent executor restart", async () => {

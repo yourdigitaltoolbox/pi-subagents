@@ -75,7 +75,7 @@ describe("relay runner strict local IPC client", () => {
 			socket.end(`${JSON.stringify(response)}\n`);
 		});
 		const client = createRelayRunnerClient({ token, socketPath, timeoutMs: 100 });
-		const issued = await client.issue(binding, 30_000);
+		const issued = await client.issue(binding, 30_000, "fallback");
 		assert.equal(issued.ok, true);
 		if (!issued.ok) return;
 		const renewed = await client.renew(issued.lease, 30_000, "88888888-8888-4888-8888-888888888888");
@@ -86,6 +86,7 @@ describe("relay runner strict local IPC client", () => {
 			"relay_runner_issue", "relay_runner_renew", "relay_runner_close", "relay_runner_release",
 		]);
 		assert.ok(observed.every((request) => request.token === token));
+		assert.equal(observed[0]?.intentSource, "fallback");
 		assert.equal(JSON.stringify([issued, renewed]).includes(token), false);
 	});
 
@@ -98,7 +99,7 @@ describe("relay runner strict local IPC client", () => {
 			reason: "invalid_runner_delegation",
 			workloadId: token,
 		})}\n`));
-		const result = await createRelayRunnerClient({ token, socketPath, timeoutMs: 100 }).issue(binding, 30_000);
+		const result = await createRelayRunnerClient({ token, socketPath, timeoutMs: 100 }).issue(binding, 30_000, "run");
 		assert.deepEqual(result, { ok: false, reason: "invalid_reply" });
 		assert.equal(JSON.stringify(result).includes(token), false);
 	});

@@ -135,6 +135,8 @@ function statusStepForTask(task: RunnerSubagentStep): StatusStep {
 			workspaceId: task.childIdentity.workspaceId,
 			agentId: task.childIdentity.agentId,
 		} : {}),
+		...(task.requestedExposure ? { requestedExposure: task.requestedExposure } : {}),
+		...(task.requestedExposureSource ? { requestedExposureSource: task.requestedExposureSource } : {}),
 		phase: task.phase,
 		label: task.label,
 		outputName: task.outputName,

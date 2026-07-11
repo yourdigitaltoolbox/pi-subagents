@@ -34,6 +34,7 @@ describe("child session contract", () => {
 			parentSessionId: "parent-session",
 			parentAgentId: "parent-agent",
 			requestedExposure: "local",
+			intentSource: "agent",
 			processEpoch: "22222222-2222-4222-8222-222222222222",
 			producer: {
 				name: "pi-subagents",
@@ -56,6 +57,7 @@ describe("child session contract", () => {
 		assert.equal(descriptor.agentId, stableChildAgentId("run-123", "reviewer", 2));
 		assert.equal(descriptor.processEpoch, "22222222-2222-4222-8222-222222222222");
 		assert.equal(descriptor.requestedExposure, "local");
+		assert.equal(descriptor.intentSource, "agent");
 		assert.deepEqual(descriptor.producer, {
 			name: "pi-subagents",
 			version: "0.34.0",
@@ -88,6 +90,8 @@ describe("child session contract", () => {
 		assert.equal(second.workspaceId, identity.workspaceId);
 		assert.equal(second.agentId, identity.agentId);
 		assert.notEqual(first.processEpoch, second.processEpoch);
+		assert.equal(first.intentSource, "fallback");
+		assert.equal(second.intentSource, "fallback");
 		assert.match(first.workspaceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 		assert.match(first.agentId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 		assert.match(first.processEpoch, /^[0-9a-f-]{36}$/);
@@ -102,7 +106,7 @@ describe("child session contract", () => {
 			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 			fs.chmodSync(dir, 0o700);
 			const configPath = path.join(dir, "config.json");
-			fs.writeFileSync(configPath, JSON.stringify({ schema_version: 1, revision: 1, workspace_id: configured }), { mode: 0o600 });
+			fs.writeFileSync(configPath, JSON.stringify({ schema_version: 1, revision: 1, workspace_id: configured, child_exposure: "relay" }), { mode: 0o600 });
 			fs.chmodSync(configPath, 0o600);
 			assert.equal(resolveChildWorkspaceId(cwd, { descriptorJson: "" }), configured);
 			assert.equal(resolveChildWorkspaceId(cwd, {

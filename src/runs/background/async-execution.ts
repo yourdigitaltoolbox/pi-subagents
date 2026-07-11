@@ -17,6 +17,7 @@ import {
 	RELAY_RUNNER_SOCKET_ENV,
 	delegateRelayRunner,
 	explicitExtensionSelectionLoadsRemotePi,
+	relayIntentMayNeedAuthority,
 	type RelayExposureEventBus,
 	type RelayRunnerDelegationResult,
 } from "../shared/relay-exposure.ts";
@@ -519,7 +520,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			tools: a.tools,
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
-			requestedExposure: a.exposure,
+			requestedExposure: a.exposure ?? "local",
+			requestedExposureSource: a.exposureIntentSource ?? (a.exposure !== undefined ? "agent" : "fallback"),
 			mcpDirectTools: a.mcpDirectTools,
 			completionGuard: a.completionGuard,
 			systemPrompt,
@@ -649,6 +651,7 @@ async function requestAsyncRunnerDelegation(
 	workspaceId: string | undefined,
 	ctx: AsyncExecutionContext,
 	timeoutMs: number | undefined,
+	intentSources: Array<"run" | "agent" | "fallback">,
 ): Promise<RelayRunnerDelegation | undefined> {
 	if (!workspaceId) return undefined;
 	const events = ctx.pi.events as unknown as RelayExposureEventBus;
@@ -665,6 +668,7 @@ async function requestAsyncRunnerDelegation(
 		delegationTtlMs: boundedRunTtl,
 		maxLeaseTtlMs: ASYNC_RELAY_RUNNER_LEASE_TTL_MS,
 		maxChildIssues: ASYNC_RELAY_RUNNER_MAX_CHILD_ISSUES,
+		intentSources,
 		timeoutMs: 2_000,
 	});
 	return result.ok ? result : undefined;
@@ -680,7 +684,18 @@ async function releaseUnusedRunnerDelegation(delegation: RelayRunnerDelegation |
 }
 
 function agentNeedsAsyncRelay(agent: AgentConfig | undefined): boolean {
-	return agent?.exposure === "relay" && explicitExtensionSelectionLoadsRemotePi(agent.extensions);
+	if (!agent) return false;
+	const source = agent.exposureIntentSource ?? (agent.exposure !== undefined ? "agent" : "fallback");
+	return relayIntentMayNeedAuthority(agent.exposure, source)
+		&& explicitExtensionSelectionLoadsRemotePi(agent.extensions);
+}
+
+function asyncRelayIntentSources(agents: Array<AgentConfig | undefined>): Array<"run" | "agent" | "fallback"> {
+	const sources = new Set<"run" | "agent" | "fallback">();
+	for (const agent of agents.filter(agentNeedsAsyncRelay)) {
+		sources.add(agent?.exposureIntentSource ?? (agent?.exposure !== undefined ? "agent" : "fallback"));
+	}
+	return (["run", "agent", "fallback"] as const).filter((source) => sources.has(source));
 }
 
 export async function executeAsyncChainWithRelay(
@@ -691,9 +706,9 @@ export async function executeAsyncChainWithRelay(
 	// relay. Append requests arrive later through durable files and may select an
 	// agent not present in the initial chain; they must reuse this in-memory token
 	// rather than persisting or introducing authority after detach.
-	const needsRelay = params.agents.some(agentNeedsAsyncRelay);
-	const runnerDelegation = needsRelay
-		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs)
+	const intentSources = asyncRelayIntentSources(params.agents);
+	const runnerDelegation = intentSources.length > 0
+		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs, intentSources)
 		: undefined;
 	const result = executeAsyncChain(id, { ...params, runnerDelegation });
 	if (result.isError) await releaseUnusedRunnerDelegation(runnerDelegation);
@@ -704,8 +719,9 @@ export async function executeAsyncSingleWithRelay(
 	id: string,
 	params: AsyncSingleParams,
 ): Promise<AsyncExecutionResult> {
-	const runnerDelegation = agentNeedsAsyncRelay(params.agentConfig)
-		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs)
+	const intentSources = asyncRelayIntentSources([params.agentConfig]);
+	const runnerDelegation = intentSources.length > 0
+		? await requestAsyncRunnerDelegation(id, params.workspaceId, params.ctx, params.timeoutMs, intentSources)
 		: undefined;
 	const result = executeAsyncSingle(id, { ...params, runnerDelegation });
 	if (result.isError) await releaseUnusedRunnerDelegation(runnerDelegation);
@@ -1059,7 +1075,8 @@ export function executeAsyncSingle(
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,
-						requestedExposure: agentConfig.exposure,
+						requestedExposure: agentConfig.exposure ?? "local",
+						requestedExposureSource: agentConfig.exposureIntentSource ?? (agentConfig.exposure !== undefined ? "agent" : "fallback"),
 						mcpDirectTools: agentConfig.mcpDirectTools,
 						completionGuard: agentConfig.completionGuard,
 						systemPrompt,

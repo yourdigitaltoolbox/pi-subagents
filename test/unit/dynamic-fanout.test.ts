@@ -126,16 +126,25 @@ describe("dynamic fanout helpers", () => {
 		}
 	});
 
-	it("accepts a runner-injected parentSessionId on the parallel template but keeps it out of user-facing validation", () => {
-		// Regression: the async runner threads parentSessionId onto the dynamic parallel
-		// template for permission-system forwarding. It must pass runner-internal validation
-		// (allowRunnerFields) without leaking into the user-facing dynamic field whitelist.
+	it("preserves runner-only session and exposure-source metadata without admitting it as user input", () => {
+		// Regression: the async runner threads internal metadata onto the dynamic parallel
+		// template. It must survive materialization under runner validation without leaking
+		// into the user-facing dynamic field whitelist.
 		const runnerStep = {
 			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
-			parallel: { agent: "reviewer", task: "Review {item.path}", parentSessionId: "session-parent" },
+			parallel: {
+				agent: "reviewer",
+				task: "Review {item.path}",
+				parentSessionId: "session-parent",
+				requestedExposure: "local",
+				requestedExposureSource: "fallback",
+			},
 			collect: { as: "reviews" },
 		} as unknown as Parameters<typeof validateDynamicStepShape>[0];
 		assert.doesNotThrow(() => validateDynamicStepShape(runnerStep, 1, { allowRunnerFields: true }));
+		const materialized = materializeDynamicParallelStep(runnerStep as never, outputs, 1, { allowRunnerFields: true });
+		assert.equal(materialized.parallel[0]?.requestedExposure, "local");
+		assert.equal(materialized.parallel[0]?.requestedExposureSource, "fallback");
 		assert.throws(
 			() => validateDynamicStepShape(runnerStep, 1),
 			(error: unknown) => error instanceof DynamicFanoutError && /parentSessionId/.test(error.message),

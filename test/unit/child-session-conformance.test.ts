@@ -42,6 +42,7 @@ describe("child-session conformance vectors", () => {
 			parentSessionId: expected.parentSessionId,
 			parentAgentId: expected.parentAgentId,
 			requestedExposure: expected.requestedExposure,
+			intentSource: expected.intentSource,
 			processEpoch: expected.processEpoch,
 			producer: {
 				name: expected.producer.name,

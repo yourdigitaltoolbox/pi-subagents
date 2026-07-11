@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChildRuntimeIdentity } from "./child-session-contract.ts";
+import type { ChildExposureIntentSource, ChildExposureMode, ChildRuntimeIdentity } from "./child-session-contract.ts";
 export { RELAY_RUNNER_DELEGATION_ENV, RELAY_RUNNER_SOCKET_ENV } from "./relay-runner-env.ts";
 
 export const RELAY_EXPOSURE_RPC_VERSION = 1 as const;
@@ -48,6 +48,7 @@ const FAILURE_REASONS = new Set([
 	"invalid_runner_scope",
 	"invalid_child_issue_limit",
 	"runner_delegation_capacity_exceeded",
+	"policy_denied",
 ]);
 const BINDING_FIELDS = new Set(["runId", "workspaceId", "agentId", "processEpoch", "mode"]);
 const MAX_RUN_ID_BYTES = 512;
@@ -95,6 +96,14 @@ export function isRelayExposureCapability(value: unknown): value is string {
 	if (typeof value !== "string") return false;
 	const match = CAPABILITY_PATTERN.exec(value);
 	return match !== null && UUID_PATTERN.test(match[1]!);
+}
+
+/** Remote policy fallback may need to ask remote-pi even though its safe wire value is local. */
+export function relayIntentMayNeedAuthority(
+	exposure: ChildExposureMode | undefined,
+	intentSource: ChildExposureIntentSource | undefined,
+): boolean {
+	return exposure === "relay" || (exposure !== "off" && intentSource === "fallback");
 }
 
 /** Explicit extension allowlists disable package discovery; never hand a bearer to a child that omitted remote-pi. */
@@ -376,6 +385,7 @@ export function delegateRelayRunner(
 		delegationTtlMs: number;
 		maxLeaseTtlMs: number;
 		maxChildIssues: number;
+		intentSources?: readonly ChildExposureIntentSource[];
 		timeoutMs?: number;
 		now?: () => number;
 	},
@@ -392,6 +402,14 @@ export function delegateRelayRunner(
 		|| options.maxChildIssues <= 0) {
 		return Promise.resolve({ ok: false, reason: "invalid_request" });
 	}
+	const intentSources = options.intentSources ?? ["run"];
+	if (!Array.isArray(intentSources)
+		|| intentSources.length === 0
+		|| intentSources.length > 3
+		|| intentSources.some((source) => source !== "run" && source !== "agent" && source !== "fallback")
+		|| new Set(intentSources).size !== intentSources.length) {
+		return Promise.resolve({ ok: false, reason: "invalid_request" });
+	}
 	const requestId = randomUUID();
 	return performRpc(
 		events,
@@ -405,6 +423,7 @@ export function delegateRelayRunner(
 			delegationTtlMs: options.delegationTtlMs,
 			maxLeaseTtlMs: options.maxLeaseTtlMs,
 			maxChildIssues: options.maxChildIssues,
+			intentSources: [...intentSources],
 		},
 		(raw) => parseRunnerDelegateReply(raw, requestId, options, (options.now ?? Date.now)()),
 		options.timeoutMs ?? 250,
@@ -434,7 +453,7 @@ export function promoteRelayExposureLease(
 export function requestRelayExposureLease(
 	events: RelayExposureEventBus,
 	binding: RelayExposureBinding,
-	options: { ttlMs: number; timeoutMs?: number; now?: () => number },
+	options: { ttlMs: number; intentSource?: ChildExposureIntentSource; timeoutMs?: number; now?: () => number },
 ): Promise<RelayExposureRequestResult> {
 	if (!validBinding(binding) || !Number.isSafeInteger(options.ttlMs) || options.ttlMs <= 0) {
 		return Promise.resolve({ ok: false, reason: "invalid_request" });
@@ -443,7 +462,7 @@ export function requestRelayExposureLease(
 	return performRpc(
 		events,
 		requestId,
-		{ version: 1, requestId, method: "issue", binding: { ...binding }, ttlMs: options.ttlMs },
+		{ version: 1, requestId, method: "issue", binding: { ...binding }, ttlMs: options.ttlMs, intentSource: options.intentSource ?? "run" },
 		(raw) => parseIssueReply(raw, requestId, binding, (options.now ?? Date.now)()),
 		options.timeoutMs ?? 250,
 	) as Promise<RelayExposureRequestResult>;

@@ -894,6 +894,7 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			relayExposureCapability: relayCapability,
 			parentSessionId: "parent-session",
 			requestedExposure: "relay",
+			requestedExposureSource: "run",
 			remotePiCompatibility: { state: "absent" },
 		});
 		const second = buildPiArgs({
@@ -906,7 +907,8 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			childAgentName: "reviewer",
 			childIndex: 3,
 			childIdentity,
-			requestedExposure: "relay",
+			requestedExposure: "local",
+			requestedExposureSource: "fallback",
 			remotePiCompatibility: { state: "absent" },
 		});
 
@@ -915,6 +917,9 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		const nextDescriptor = JSON.parse(second.env[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
 		assert.equal(descriptor.version, 1);
 		assert.equal(descriptor.requestedExposure, "relay");
+		assert.equal(descriptor.intentSource, "run");
+		assert.equal(nextDescriptor.requestedExposure, "local");
+		assert.equal(nextDescriptor.intentSource, "fallback");
 		assert.equal(descriptor.parentSessionId, "parent-session");
 		assert.equal(descriptor.index, 3);
 		assert.equal(descriptor.workspaceId, childIdentity.workspaceId);

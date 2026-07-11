@@ -54,6 +54,7 @@ import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-a
 import { createChildRuntimeIdentity, resolveChildWorkspaceId } from "../shared/child-session-contract.ts";
 import {
 	explicitExtensionSelectionLoadsRemotePi,
+	relayIntentMayNeedAuthority,
 	requestRelayExposureLease,
 	type RelayExposureBinding,
 	type RelayExposureEventBus,
@@ -222,6 +223,7 @@ async function runSingleAttempt(
 		})
 		: undefined;
 	const childProcessEpoch = randomUUID();
+	const exposureIntentSource = agent.exposureIntentSource ?? (agent.exposure !== undefined ? "agent" : "fallback");
 	let relayExposureCapability: string | undefined;
 	let relayExposureLease: RelayExposureLeaseMetadata | undefined;
 	const relayExposureEvents = options.intercomEvents as RelayExposureEventBus | undefined;
@@ -236,11 +238,11 @@ async function runSingleAttempt(
 			mode: "relay",
 		}
 		: undefined;
-	if (agent.exposure === "relay" && relayExposureBinding && relayExposureEvents) {
+	if (relayIntentMayNeedAuthority(agent.exposure, exposureIntentSource) && relayExposureBinding && relayExposureEvents) {
 		const issued = await requestRelayExposureLease(
 			relayExposureEvents,
 			relayExposureBinding,
-			{ ttlMs: DEFAULT_RELAY_EXPOSURE_TTL_MS },
+			{ ttlMs: DEFAULT_RELAY_EXPOSURE_TTL_MS, intentSource: exposureIntentSource },
 		);
 		if (issued.ok) {
 			relayExposureCapability = issued.capability;
@@ -274,6 +276,7 @@ async function runSingleAttempt(
 		childIdentity: options.childIdentity,
 		childProcessEpoch,
 		requestedExposure: agent.exposure,
+		requestedExposureSource: exposureIntentSource,
 		relayExposureCapability,
 		parentEventSink: options.nestedRoute?.eventSink,
 		parentControlInbox: options.nestedRoute?.controlInbox,
@@ -1345,6 +1348,8 @@ export async function runSync(
 
 	result.workspaceId = childIdentity.workspaceId;
 	result.agentId = childIdentity.agentId;
+	result.requestedExposure = agent.exposure ?? "local";
+	result.requestedExposureSource = agent.exposureIntentSource ?? (agent.exposure !== undefined ? "agent" : "fallback");
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;

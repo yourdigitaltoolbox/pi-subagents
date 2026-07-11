@@ -26,7 +26,7 @@ describe("async resume lookup", () => {
 				lastUpdate: 200,
 				cwd: root,
 				sessionFile,
-				steps: [{ agent: "worker", status: "complete" }],
+				steps: [{ agent: "worker", status: "complete", requestedExposure: "relay", requestedExposureSource: "run" }],
 			});
 
 			const target = resolveAsyncResumeTarget({ id: "run-a" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
@@ -36,7 +36,56 @@ describe("async resume lookup", () => {
 			assert.equal(target.agent, "worker");
 			assert.equal(target.sessionFile, sessionFile);
 			assert.equal(target.cwd, root);
+			assert.equal(target.requestedExposure, "relay");
+			assert.equal(target.requestedExposureSource, "run");
 			assert.equal(target.intercomTarget, "subagent-worker-run-abc-1");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects conflicting exposure intent across completed status and result records", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-intent-conflict-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "session.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-conflict", "status.json"), {
+				runId: "run-conflict",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				endedAt: 200,
+				lastUpdate: 200,
+				cwd: root,
+				steps: [{
+					agent: "worker",
+					status: "complete",
+					sessionFile,
+					requestedExposure: "local",
+					requestedExposureSource: "agent",
+				}],
+			});
+			writeJson(path.join(resultsDir, "run-conflict.json"), {
+				id: "run-conflict",
+				runId: "run-conflict",
+				agent: "worker",
+				state: "complete",
+				success: true,
+				results: [{
+					agent: "worker",
+					success: true,
+					sessionFile,
+					requestedExposure: "relay",
+					requestedExposureSource: "run",
+				}],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-conflict" }, { asyncDirRoot: asyncRoot, resultsDir }),
+				/conflicting durable exposure intent/,
+			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -80,6 +129,18 @@ describe("async resume lookup", () => {
 			assert.throws(
 				() => resolveAsyncResumeTarget({ id: "run-identity" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
 				/incomplete child identity/,
+			);
+
+			writeJson(statusPath, {
+				runId: "run-identity",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "complete", sessionFile, requestedExposure: "relay" }],
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-identity" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/incomplete exposure intent/,
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

@@ -1399,12 +1399,14 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const relayCapability = `rpel1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
 		const eventBus = createEventBus();
 		let issueRequests = 0;
+		const issueSources: unknown[] = [];
 		const lifecycleRequests: Array<Record<string, unknown>> = [];
 		let issuedLease: Record<string, unknown> | undefined;
 		eventBus.on(RELAY_EXPOSURE_REQUEST_EVENT, (raw) => {
-			const request = raw as { requestId: string; method: string; binding: Record<string, unknown> };
+			const request = raw as { requestId: string; method: string; binding: Record<string, unknown>; intentSource?: unknown };
 			if (request.method === "issue") {
 				issueRequests++;
+				issueSources.push(request.intentSource);
 				const issuedAt = Date.now();
 				issuedLease = {
 					relayExposureLeaseId: "44444444-4444-4444-8444-444444444444",
@@ -1449,12 +1451,30 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const inheritedEnv = JSON.parse(inherited.details?.results?.[0]?.finalOutput ?? "{}");
 		const inheritedDescriptor = JSON.parse(inheritedEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
 		assert.equal(inheritedDescriptor.requestedExposure, "relay");
+		assert.equal(inheritedDescriptor.intentSource, "agent");
 		assert.equal(inheritedEnv[RELAY_EXPOSURE_CAPABILITY_ENV], relayCapability);
 		assert.equal(issueRequests, 1);
+		assert.deepEqual(issueSources, ["agent"]);
 		assert.deepEqual(lifecycleRequests.map((request) => request.method), ["close"]);
 		assert.equal(lifecycleRequests[0]?.reason, "completed");
 		assert.equal("capability" in (lifecycleRequests[0] ?? {}), false);
 		assert.ok(!readCallArgs().includes("--no-extensions"));
+
+		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
+		const fallback = await makeExecutor([makeAgent("echo")], {}, false, eventBus).execute(
+			"remote-policy-fallback",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const fallbackEnv = JSON.parse(fallback.details?.results?.[0]?.finalOutput ?? "{}");
+		const fallbackDescriptor = JSON.parse(fallbackEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(fallbackDescriptor.requestedExposure, "local");
+		assert.equal(fallbackDescriptor.intentSource, "fallback");
+		assert.equal(fallbackEnv[RELAY_EXPOSURE_CAPABILITY_ENV], relayCapability);
+		assert.equal(issueRequests, 2);
+		assert.deepEqual(issueSources, ["agent", "fallback"]);
 
 		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
 		const overridden = await executor.execute(
@@ -1467,8 +1487,9 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const overriddenEnv = JSON.parse(overridden.details?.results?.[0]?.finalOutput ?? "{}");
 		const overriddenDescriptor = JSON.parse(overriddenEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
 		assert.equal(overriddenDescriptor.requestedExposure, "off");
+		assert.equal(overriddenDescriptor.intentSource, "run");
 		assert.equal(overriddenEnv[RELAY_EXPOSURE_CAPABILITY_ENV], "");
-		assert.equal(issueRequests, 1, "off exposure must not request a relay capability");
+		assert.equal(issueRequests, 2, "off exposure must not request a relay capability");
 		assert.ok(!readCallArgs().includes("--no-extensions"));
 
 		mockPi.onCall({ echoEnv: [CHILD_SESSION_DESCRIPTOR_ENV, RELAY_EXPOSURE_CAPABILITY_ENV] });
@@ -1482,8 +1503,10 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			makeMinimalCtx(tempDir),
 		);
 		const allowlistedEnv = JSON.parse(allowlisted.details?.results?.[0]?.finalOutput ?? "{}");
+		const allowlistedDescriptor = JSON.parse(allowlistedEnv[CHILD_SESSION_DESCRIPTOR_ENV] ?? "null");
+		assert.equal(allowlistedDescriptor.intentSource, "agent");
 		assert.equal(allowlistedEnv[RELAY_EXPOSURE_CAPABILITY_ENV], "");
-		assert.equal(issueRequests, 1, "an allowlist without remote-pi must not receive a bearer");
+		assert.equal(issueRequests, 2, "an allowlist without remote-pi must not receive a bearer");
 		assert.ok(readCallArgs().includes("--no-extensions"));
 	});
 
