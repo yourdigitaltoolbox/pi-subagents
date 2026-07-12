@@ -26,6 +26,20 @@ Use this skill when the parent orchestrator needs to launch a specialized subage
 - **Subagent control**: watch needs-attention signals and soft-interrupt only when a delegated run is genuinely blocked
 - **Agent authoring**: create, update, or override agents and chains for a project
 
+## Cost-aware model routing
+
+Before every material launch, choose the cheapest model that can preserve correctness instead of inheriting the parent model by accident. When the bundled `cost-aware-model-routing` skill matches the provider/task, read `../cost-aware-model-routing/SKILL.md` and follow it.
+
+For the GPT-5.6 Sol/Terra/Luna fleet, start with:
+
+- **Luna** for deterministic status, inventory, bounded recon, selected test runs, formatting, evidence, and bookkeeping;
+- **Terra** for normal implementation, diagnosis, research synthesis, planning, context building, and routine review;
+- **Sol** for architecture, authority/security/privacy, destructive or production decisions, cross-repo contracts, conflicting evidence, and final high-risk adjudication.
+
+Pass `model` explicitly on tiered runs, include an escalation/stop condition in the child task, and prefer `context: "fresh"` with a compact task packet for Luna/Terra. Fork only when inherited decisions are essential. A strong parent should delegate mechanical work downward and inspect the decision-bearing result; it should not spend strong-model turns on polling or evidence collection.
+
+These aliases are runtime/account-specific rather than portable package defaults. Verify availability with `pi --list-models` and the live mapping with `subagent({ action: "models" })`. Preserve explicit operator model choices and use another provider's equivalent tiers when Sol/Terra/Luna are unavailable.
+
 ## Tool vs Slash Commands
 
 Agents can use the `subagent(...)` tool directly for execution, management, status, and control.
@@ -206,9 +220,9 @@ For model fleets, use the profile commands instead of hand-editing repeated over
 
 ## Prompting role subagents
 
-Builtin role agents inherit the current Pi default model unless you override them. When launching them, write the task prompt as a compact contract, not a long procedural script. Define the destination and let the role choose the efficient path.
+Builtin role agents inherit the current Pi default model unless you override them. Inheritance is compatibility behavior, not a cost recommendation. Choose the routing tier before writing the prompt and pass `model` explicitly when the provider has materially different price/capability tiers. When launching agents, write the task prompt as a compact contract, not a long procedural script. Define the destination and let the role choose the efficient path.
 
-A strong subagent prompt usually includes:
+For lower-tier runs, the stop rule is part of quality control: name the ambiguity, risk, or decision boundary that requires escalation rather than guessing. A strong subagent prompt usually includes:
 - **Goal**: the concrete outcome the child should produce.
 - **Context/evidence**: relevant plan paths, files, diffs, decisions, or user constraints already approved.
 - **Success criteria**: what must be true before the child can finish.
@@ -230,18 +244,16 @@ Direct settings example:
 ```json
 {
   "subagents": {
+    "defaultModel": "openai-codex/gpt-5.6-terra",
     "agentOverrides": {
-      "reviewer": {
-        "model": "anthropic/claude-sonnet-4",
-        "thinking": "high",
-        "fallbackModels": ["openai/gpt-5-mini"]
-      }
+      "scout": { "model": "openai-codex/gpt-5.6-luna" },
+      "oracle": { "model": "openai-codex/gpt-5.6-sol", "thinking": "high" }
     }
   }
 }
 ```
 
-Useful override fields: `model`, `fallbackModels`, `thinking`,
+This is a cost-aware starting profile, not a permanent role-to-model entitlement: override a mechanical reviewer down to Luna or a security reviewer up to Sol per run. For providers without these aliases, use equivalent economy/balanced/strong models. Useful override fields: `model`, `fallbackModels`, `thinking`,
 `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`,
 `disabled`, `skills`, `tools`, and `systemPrompt`. Create a user or project
 agent with the same name only when you want a substantially different agent.
@@ -717,6 +729,10 @@ Methods: `ping`, `status`, `spawn`, `interrupt`, and `stop`. `spawn` is async-on
 Runtime config can change orchestration behavior. `asyncByDefault` and `forceTopLevelAsync` affect whether launches detach; `waitTool` can make `wait()` return immediately; `globalConcurrencyLimit` and `maxSubagentSpawnsPerSession` bound fanout; `singleRunOutputBaseDir` and `worktreeBaseDir` route outputs and worktrees; `completionBatch` groups async notifications. Per-run `artifacts: false` disables artifact capture for that launch. Async status and result artifacts are versioned with fields such as `lifecycleArtifactVersion`, `workflowGraph`, `steps`, `results`, `totalTokens`, `totalCost`, `turnCount`, `toolCount`, and nested `children`. Prefer these artifacts and `status` views over scraping terminal output.
 
 ## Best Practices
+
+### Route model and context before launch
+
+Classify each child task by risk and verification strength, select the cheapest capable model, and state when it must stop/escalate. Prefer fresh bounded context for collection and routine work; reserve forked high-context runs for inherited decision continuity. Use the bundled `cost-aware-model-routing` skill and its response-deduplicated session-cost audit when tuning a fleet.
 
 ### Prefer async orchestration
 

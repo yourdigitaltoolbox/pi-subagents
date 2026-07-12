@@ -115,6 +115,18 @@ The extension ships with builtin agents you can use immediately.
 
 A simple rule of thumb: use `scout` before you understand the code, `researcher` before you trust external facts, `planner` before a bigger change, `worker` to implement, `reviewer` to check, and `oracle` when the decision itself feels risky.
 
+## Cost-aware model routing
+
+The package includes a `cost-aware-model-routing` skill for fleets with materially different model prices. Its rule is: route each task to the cheapest model that can preserve correctness, then escalate the decision-bearing surface instead of running every mechanical step on the strongest model.
+
+For an OpenAI Codex fleet exposing GPT-5.6 Luna/Terra/Sol, the starting profile is:
+
+- Luna: deterministic status, inventory, bounded recon, test execution, evidence, and bookkeeping;
+- Terra: ordinary implementation, diagnosis, research synthesis, planning, and routine review;
+- Sol: architecture, authority/security/privacy, destructive or production decisions, cross-repo contracts, and final high-risk adjudication.
+
+These aliases are account/runtime-specific and are not package-wide defaults. Verify the active catalog, pass a model explicitly for tiered work, use fresh compact context for routine children, and give lower-tier tasks a clear stop/escalation rule. The skill also bundles a privacy-safe session-cost audit that deduplicates response history copied into forked or resumed session logs.
+
 ## Changing an agent's model
 
 Builtin agents inherit your current Pi default model by default. This keeps new installs from depending on a provider you may not have configured. If you want every subagent without its own model to use a different default, set `subagents.defaultModel`. If you want a role to use a specific model, set an override instead of copying the bundled agent file.

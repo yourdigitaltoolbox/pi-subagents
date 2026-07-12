@@ -4,6 +4,8 @@ description: Parallel subagents review
 
 Launch parallel reviewers for an adversarial review of the current work.
 
+Apply the `cost-aware-model-routing` skill before launch. Use Luna for mechanical/checklist scans, Terra for ordinary correctness and maintainability review, and Sol only for security/authority, cross-repo/public-contract, destructive/production, or genuinely disputed final judgment. Pass models explicitly; do not run every review angle on Sol.
+
 Use fresh context, not forked context, unless I explicitly ask for forked context. Reviewers should inspect the repository, relevant instructions, and current diff directly from files and commands. Do not rely on the main conversation history.
 
 Give each reviewer a distinct angle. Generate the angles dynamically from the user's intent, the plan, the implemented code, and the current diff. If I specify angles, use mine. Otherwise, choose the highest-value review angles for this specific work.
