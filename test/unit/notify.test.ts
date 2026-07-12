@@ -233,6 +233,33 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 2);
 	});
 
+	it("routes successful and failure notifications into their separate lifecycle lanes without sending early", () => {
+		const events = new EventEmitter();
+		const sent: unknown[] = [];
+		const successful: Array<readonly { key: string; value: SubagentNotifyDetails }[]> = [];
+		const failures: Array<readonly { key: string; value: SubagentNotifyDetails }[]> = [];
+		registerSubagentNotify({
+			events,
+			sendMessage(message: unknown) { sent.push(message); },
+		} as never, { currentSessionId: "session-a" }, {
+			batchConfig: { enabled: false },
+			lifecycle: {
+				success: { receiveBatch(entries) { successful.push(entries); return "held"; } },
+				failure: { receiveBatch(entries) { failures.push(entries); return "held"; } },
+			},
+		});
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-success", success: true }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-failure", success: false, exitCode: 1, summary: "failed" }));
+
+		assert.equal(sent.length, 0);
+		assert.equal(successful.length, 1);
+		assert.equal(successful[0]?.[0]?.key, "id:held-success");
+		assert.equal(failures.length, 1);
+		assert.equal(failures[0]?.[0]?.key, "id:held-failure");
+		assert.equal(failures[0]?.[0]?.value.status, "failed");
+	});
+
 	it("groups sibling successes into a single notification after the debounce window", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);

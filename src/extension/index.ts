@@ -38,7 +38,8 @@ import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig, waitForSubagents } from "../runs/background/wait.ts";
-import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import registerSubagentNotify, { formatSingleCompletion, sendCompletion, type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import { LifecycleGate, resolveLifecycleGateMode } from "../runs/background/lifecycle-gate.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig } from "./config.ts";
@@ -60,6 +61,7 @@ import {
 	clearPendingForegroundControlNotices,
 	formatSubagentControlNotice,
 	handleSubagentControlNotice,
+	sendControlNotices,
 	SUBAGENT_CONTROL_MESSAGE_TYPE,
 	type SubagentControlMessageDetails,
 } from "./control-notices.ts";
@@ -285,6 +287,70 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 	};
 
+	const lifecycleMode = resolveLifecycleGateMode(config.contextLifecycle?.mode);
+	const lifecycleBlocked = new Set<string>();
+	const reportLifecycleBlocked = (lane: string, code: string) => {
+		const key = `${lane}:${code}`;
+		if (lifecycleBlocked.has(key)) return;
+		lifecycleBlocked.add(key);
+		pi.sendMessage({
+			customType: "subagent-lifecycle-blocked",
+			content: `Subagent ${lane} notifications are held because managed context lifecycle authority is unavailable (${code}). Install/configure the pinned lifecycle extension or use explicit test/development compatibility mode.`,
+			display: true,
+		});
+	};
+	const lifecycleSuccessGate = new LifecycleGate<SubagentNotifyDetails>({
+		laneId: "subagent-success",
+		mode: lifecycleMode,
+		getSessionId: () => state.currentSessionId,
+		emit: (batch) => sendCompletion(pi, batch.items, batch.overflowCount),
+		onBlocked: (code) => reportLifecycleBlocked("success", code),
+		source: "pi-subagents-completion",
+	});
+	type LifecycleFailureNotice =
+		| { kind: "completion"; details: SubagentNotifyDetails }
+		| { kind: "control"; details: SubagentControlMessageDetails };
+	const lifecycleFailureGate = new LifecycleGate<LifecycleFailureNotice>({
+		laneId: "failure-attention-decision",
+		mode: lifecycleMode,
+		getSessionId: () => state.currentSessionId,
+		emit: (batch) => {
+			const completions = batch.items.filter((item): item is { kind: "completion"; details: SubagentNotifyDetails } => item.kind === "completion").map((item) => item.details);
+			const controls = batch.items.filter((item): item is { kind: "control"; details: SubagentControlMessageDetails } => item.kind === "control").map((item) => item.details);
+			if (completions.length === 0) {
+				sendControlNotices(pi, controls, batch.overflowCount);
+				return;
+			}
+			if (controls.length === 0) {
+				sendCompletion(pi, completions, batch.overflowCount);
+				return;
+			}
+			pi.sendMessage({
+				customType: "subagent-lifecycle-alert",
+				content: [
+					"Subagent failure and attention notifications",
+					"",
+					...completions.map((detail) => formatSingleCompletion(detail)),
+					...controls.map((detail) => formatSubagentControlNotice(detail)),
+					...(batch.overflowCount > 0 ? ["", `${batch.overflowCount} additional notifications are represented by a bounded rollup; inspect subagent status for retained results.`] : []),
+				].join("\n\n"),
+				display: true,
+			}, { triggerTurn: true });
+		},
+		onBlocked: (code) => reportLifecycleBlocked("failure-attention", code),
+		source: "pi-subagents-failure-attention",
+	});
+	const lifecycleFailureCompletionReceiver = {
+		receiveBatch(entries: readonly { key: string; value: SubagentNotifyDetails }[]) {
+			return lifecycleFailureGate.receiveBatch(entries.map((entry) => ({ key: entry.key, value: { kind: "completion" as const, details: entry.value } })));
+		},
+	};
+	const lifecycleControlReceiver = {
+		receive(key: string, value: SubagentControlMessageDetails) {
+			return lifecycleFailureGate.receive(key, { kind: "control", details: value });
+		},
+	};
+
 	const supervisorChannel = createNativeSupervisorChannel(pi, state);
 	const mainWatchdog = registerMainWatchdog(pi);
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
@@ -298,6 +364,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const runtimeCleanup = () => {
 		mainWatchdog.dispose();
+		lifecycleSuccessGate.dispose();
+		lifecycleFailureGate.dispose();
 		stopResultWatcher();
 		scheduledRunManager.stop();
 		supervisorChannel.dispose();
@@ -545,7 +613,13 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 			}
 		}
 	}
-	registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
+	registerSubagentNotify(pi, state, {
+		batchConfig: config.completionBatch,
+		lifecycle: {
+			success: lifecycleSuccessGate,
+			failure: lifecycleFailureCompletionReceiver,
+		},
+	});
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
@@ -556,6 +630,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 			state,
 			visibleControlNotices,
 			details: payload as SubagentControlMessageDetails,
+			lifecycleGate: lifecycleControlReceiver,
 		});
 	};
 	const eventUnsubscribes = [
@@ -619,7 +694,17 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		supervisorChannel.start();
 	});
 
+	// Pi emits session_compact only after a durable compaction entry exists.
+	// Failed, cancelled, and blocked lifecycle operations never reach this hook.
+	pi.on("session_compact", (_event, ctx) => {
+		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
+		if (sessionId !== state.currentSessionId) return;
+		state.subagentSpawns = { sessionId, count: 0 };
+	});
+
 	pi.on("session_shutdown", () => {
+		lifecycleSuccessGate.dispose();
+		lifecycleFailureGate.dispose();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];
 		for (const unsubscribe of eventUnsubscribes) {
 			try {
