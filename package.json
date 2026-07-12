@@ -77,13 +77,14 @@
     }
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.74.0",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@yourdigitaltoolbox/pi-context-lifecycle": "git+https://github.com/yourdigitaltoolbox/pi-context-lifecycle.git#63c9d9901dcd2ffad1a45a44791e1d8040db600f",
     "jiti": "2.7.0",
     "typebox": "1.1.24"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.74.0",
-    "@earendil-works/pi-ai": "0.74.0",
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6"
   }
 }
