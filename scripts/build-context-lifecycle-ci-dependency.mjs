@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -27,12 +27,19 @@ const npmCli =
 		: join(dirname(dirname(process.execPath)), "lib", "node_modules", "npm", "bin", "npm-cli.js");
 
 async function run(command, args, cwd) {
-	await execFile(command, args, { cwd });
+	await new Promise((resolveRun, rejectRun) => {
+		const child = spawn(command, args, { cwd, stdio: "inherit", windowsHide: true });
+		child.once("error", rejectRun);
+		child.once("close", (code, signal) => {
+			if (code === 0) resolveRun();
+			else rejectRun(new Error(`${command} exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`));
+		});
+	});
 }
 
 async function runNpm(args, cwd) {
 	await stat(npmCli);
-	await execFile(process.execPath, [npmCli, ...args], { cwd });
+	await run(process.execPath, [npmCli, ...args], cwd);
 }
 
 try {
