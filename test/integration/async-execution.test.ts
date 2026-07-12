@@ -343,13 +343,18 @@ function readMockPiArgsMatching(mockPi: MockPi, text: string): string[] {
 	assert.fail(`expected recorded call containing ${text}`);
 }
 
+function relayIpcPath(root: string, name: string): string {
+	if (process.platform !== "win32") return path.join(root, `${name}.sock`);
+	return `\\\\.\\pipe\\pi-subagents-${name}-${process.pid}-${randomUUID()}`;
+}
+
 async function createRelayRunnerHarness(root: string): Promise<{
 	eventBus: ReturnType<typeof createEventBus>;
 	delegations: Array<{ rootRunId: string; token: string; intentSources: unknown }>;
 	requests: Array<Record<string, unknown>>;
 	close(): Promise<void>;
 }> {
-	const socketPath = path.join(root, "relay-runner-harness.sock");
+	const socketPath = relayIpcPath(root, "relay-runner-harness");
 	const delegations: Array<{ rootRunId: string; token: string; intentSources: unknown }> = [];
 	const requests: Array<Record<string, unknown>> = [];
 	const leases = new Map<string, Record<string, unknown>>();
@@ -495,7 +500,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const token = `rprd1.44444444-4444-4444-8444-444444444444.${"a".repeat(43)}`;
 		const leaseId = "55555555-5555-4555-8555-555555555555";
 		const childCapability = `rpel1.${leaseId}.${"b".repeat(43)}`;
-		const socketPath = path.join(tempDir, "relay-broker.sock");
+		const socketPath = relayIpcPath(tempDir, "relay-broker");
 		const requests: Array<Record<string, unknown>> = [];
 		let delegationIntentSources: unknown;
 		let issuedLease: Record<string, unknown> | undefined;
@@ -617,7 +622,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const id = `async-relay-chain-${Date.now().toString(36)}`;
 		const workspaceId = "11111111-1111-4111-8111-111111111111";
 		const token = `rprd1.44444444-4444-4444-8444-444444444444.${"c".repeat(43)}`;
-		const socketPath = path.join(tempDir, "relay-chain-broker.sock");
+		const socketPath = relayIpcPath(tempDir, "relay-chain-broker");
 		const requests: Array<Record<string, unknown>> = [];
 		const leases = new Map<string, Record<string, unknown>>();
 		let issueCounter = 0;
