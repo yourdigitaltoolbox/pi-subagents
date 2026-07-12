@@ -93,7 +93,7 @@ describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packag
 		}
 	});
 
-	it("renews the spawn quota only after Pi emits session_compact", async () => {
+	it("preserves quota across reload and renews it only after Pi emits session_compact", async () => {
 		const { runRealSubagentSession, subagentCall, subagentToolResults } = await import("../support/real-session-runner.ts");
 		const subagentArgs = {
 			agent: "worker",
@@ -116,8 +116,11 @@ describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packag
 		assert.equal(first.length, 1);
 		assert.match(first[0]!, new RegExp(CHILD_MARKER));
 
-		await run.parentSession.extensionRunner.emit({ type: "agent_settled" });
-		await run.parentSession.prompt("Try a second worker before compaction.", { expandPromptTemplates: false });
+		await run.parentSession.reload();
+		const retainedQuota = (globalThis as Record<string, unknown>).__piSubagentSpawnQuotaBySession;
+		assert.ok(retainedQuota instanceof Map, "reload must retain the process-local quota registry");
+		assert.deepEqual([...retainedQuota.values()].map((entry) => (entry as { count: number }).count), [1]);
+		await run.parentSession.prompt("Try a second worker after reload but before compaction.", { expandPromptTemplates: false });
 		const beforeCompact = subagentToolResults(run.parentSession);
 		assert.equal(beforeCompact.length, 2);
 		assert.match(beforeCompact[1]!, /spawn limit reached/i);

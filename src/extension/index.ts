@@ -245,6 +245,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return;
 	}
 	const globalStore = globalThis as Record<string, unknown>;
+	const spawnQuotaStoreKey = "__piSubagentSpawnQuotaBySession";
+	const storedSpawnQuotas = globalStore[spawnQuotaStoreKey];
+	const spawnQuotaBySession = storedSpawnQuotas instanceof Map
+		? storedSpawnQuotas as Map<string, { sessionId: string; count: number }>
+		: new Map<string, { sessionId: string; count: number }>();
+	globalStore[spawnQuotaStoreKey] = spawnQuotaBySession;
 	const runtimeCleanupStoreKey = "__piSubagentRuntimeCleanup";
 	const previousRuntimeCleanup = globalStore[runtimeCleanupStoreKey];
 	if (typeof previousRuntimeCleanup === "function") {
@@ -665,8 +671,14 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 
 	const resetSessionState = (ctx: ExtensionContext) => {
 		state.baseCwd = ctx.cwd;
-		state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
-		state.subagentSpawns = { sessionId: state.currentSessionId, count: 0 };
+		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
+		state.currentSessionId = sessionId;
+		const retainedQuota = spawnQuotaBySession.get(sessionId);
+		const quota = retainedQuota && retainedQuota.sessionId === sessionId
+			? retainedQuota
+			: { sessionId, count: 0 };
+		state.subagentSpawns = quota;
+		spawnQuotaBySession.set(sessionId, quota);
 		// Set PI_SUBAGENT_PARENT_SESSION for permission-system forwarding.
 		// Only set in the root session (the interactive UI session), not in
 		// child subagent processes — children inherit the parent's value
@@ -700,9 +712,11 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
 		if (sessionId !== state.currentSessionId) return;
 		state.subagentSpawns = { sessionId, count: 0 };
+		spawnQuotaBySession.set(sessionId, state.subagentSpawns);
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (event) => {
+		if (event.reason !== "reload" && state.currentSessionId) spawnQuotaBySession.delete(state.currentSessionId);
 		lifecycleSuccessGate.dispose();
 		lifecycleFailureGate.dispose();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];

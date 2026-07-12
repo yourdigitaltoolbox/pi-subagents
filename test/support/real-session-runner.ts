@@ -286,7 +286,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 			}
 		});
 
-		await session.bindExtensions({});
+		await session.bindExtensions({ onError: () => {} });
 		if (!session.extensionRunner.getToolDefinition("subagent")) {
 			throw new Error(`E2E extension did not register the subagent tool; loaded paths: ${session.extensionRunner.getExtensionPaths().join(", ")}`);
 		}
