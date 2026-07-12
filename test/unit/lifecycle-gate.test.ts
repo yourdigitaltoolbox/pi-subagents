@@ -151,6 +151,35 @@ describe("LifecycleGate", () => {
 		gate.dispose();
 	});
 
+	it("retains idle-flush work when the consumer emitter throws", () => {
+		let idle = false;
+		const test = createAuthority(snapshot({ phase: "compacting" }), (_request, releasePermit) => idle || releasePermit ? "deliver" : "hold");
+		const blocked: string[] = [];
+		const emitted: string[] = [];
+		let attempts = 0;
+		const gate = new LifecycleGate({
+			laneId: "subagent-success",
+			mode: "managed",
+			getSessionId: () => "session",
+			emit: ({ items }) => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("delivery unavailable");
+				emitted.push(...items);
+			},
+			onBlocked: (code) => blocked.push(code),
+			authority: test.authority,
+		});
+		gate.receive("one", "one");
+		idle = true;
+		assert.doesNotThrow(() => test.setSnapshot(snapshot({ phase: "idle", sequence: 2 })));
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(blocked, ["lifecycle-idle-flush-failed"]);
+
+		test.setSnapshot(snapshot({ phase: "idle", sequence: 3 }));
+		assert.deepEqual(emitted, ["one"]);
+		gate.dispose();
+	});
+
 	it("returns a blocked acknowledgement when the permit cannot admit the lane", () => {
 		const test = createAuthority(snapshot({ phase: "compacting" }), () => "hold");
 		const gate = new LifecycleGate({

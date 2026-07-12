@@ -226,10 +226,15 @@ export class LifecycleGate<T> {
 		const records = this.recordsAtOrBefore(this.nextSequence);
 		if (records.length === 0) return;
 		if (this.admit(snapshot, `idle:${this.nextSequence}`) !== "deliver") return;
-		this.options.emit({
-			items: records.filter((record): record is HeldItem<T> => record.kind === "item").map((record) => record.value),
-			overflowCount: records.filter((record): record is HeldRollup => record.kind === "rollup").reduce((count, record) => count + record.count, 0),
-		});
+		try {
+			this.options.emit({
+				items: records.filter((record): record is HeldItem<T> => record.kind === "item").map((record) => record.value),
+				overflowCount: records.filter((record): record is HeldRollup => record.kind === "rollup").reduce((count, record) => count + record.count, 0),
+			});
+		} catch {
+			if (this.options.mode === "managed") this.options.onBlocked?.("lifecycle-idle-flush-failed");
+			return;
+		}
 		for (const record of records) {
 			if (record.kind === "item") this.heldByKey.delete(record.key);
 			else {
