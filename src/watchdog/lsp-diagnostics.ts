@@ -309,24 +309,42 @@ class JsonRpcLspClient {
 				await this.request("shutdown", null, SHUTDOWN_TIMEOUT_MS);
 				this.notify("exit", null);
 			} catch {
-				this.child.kill("SIGTERM");
+				this.terminate();
 			}
 		} else {
-			this.child.kill("SIGTERM");
+			this.terminate();
 		}
 		if (await this.waitForExit(SHUTDOWN_TIMEOUT_MS)) return;
-		// A malformed or wedged server may ignore SIGTERM. Do not leak it after
-		// the bounded diagnostic attempt; force termination and reap the exit.
-		this.child.kill("SIGKILL");
+		// A malformed or wedged server may ignore graceful shutdown. Do not leak
+		// the .cmd shell or its server child after the bounded diagnostic attempt.
+		this.terminate(true);
 		await this.waitForExit(SHUTDOWN_TIMEOUT_MS);
 	}
 
 	kill(): void {
-		if (!this.exited) this.child.kill("SIGTERM");
+		this.terminate();
 	}
 
 	stderrTail(): string {
 		return this.stderr.trim();
+	}
+
+	private terminate(force = false): void {
+		if (this.exited) return;
+		if (process.platform !== "win32" || !this.child.pid) {
+			this.child.kill(force ? "SIGKILL" : "SIGTERM");
+			return;
+		}
+		// spawn(..., { shell: true }) is required for the project's .cmd LSP
+		// entrypoint. Killing that shell alone leaves its node server orphaned.
+		const killer = spawn("taskkill", ["/pid", String(this.child.pid), "/T", "/F"], {
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		killer.once("error", () => {
+			if (!this.exited) this.child.kill("SIGTERM");
+		});
+		killer.unref();
 	}
 
 	private send(payload: JsonRpcMessage): void {
@@ -389,7 +407,7 @@ class JsonRpcLspClient {
 		if (this.exited || this.transportFailed) return;
 		this.transportFailed = true;
 		this.rejectPending(error);
-		this.child.kill("SIGTERM");
+		this.terminate();
 	}
 
 	private waitForExit(timeoutMs: number): Promise<boolean> {
