@@ -36,6 +36,7 @@ export interface RealSessionRunOptions {
 	childText: string;
 	respond: FauxResponder;
 	timeoutMs?: number;
+	subagentConfig?: Record<string, unknown>;
 }
 
 export interface RealSessionRun {
@@ -206,6 +207,11 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		delete process.env.PI_SUBAGENT_PARENT_SESSION;
 		delete process.env.PI_SUBAGENT_PI_BINARY;
 		delete process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
+		if (options.subagentConfig) {
+			const configDir = path.join(home, "extensions", "subagent");
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(path.join(configDir, "config.json"), JSON.stringify(options.subagentConfig), "utf-8");
+		}
 
 		const fauxProviderName = "faux-e2e-parent";
 		faux = createFauxCore({
