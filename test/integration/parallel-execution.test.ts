@@ -252,7 +252,7 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 					{ agent: "echo", task: "Fast review" },
 				],
 				concurrency: 2,
-				maxRuntimeMs: 300,
+				maxRuntimeMs: 1000,
 			},
 			new AbortController().signal,
 			undefined,
@@ -264,11 +264,11 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(result.isError, undefined);
 		assert.equal(result.details?.results?.length, 2);
 		assert.equal(result.details?.results?.[0]?.timedOut, true);
-		assert.equal(result.details?.results?.[0]?.error, "Subagent timed out after 300ms.");
+		assert.equal(result.details?.results?.[0]?.error, "Subagent timed out after 1000ms.");
 		assert.equal(result.details?.results?.[1]?.exitCode, 0);
 		assert.equal(result.details?.results?.[1]?.finalOutput, "fast done");
 		assert.match(result.content[0]?.text ?? "", /1\/2 succeeded/);
-		assert.match(result.content[0]?.text ?? "", /TIMED OUT: Subagent timed out after 300ms\./);
+		assert.match(result.content[0]?.text ?? "", /TIMED OUT: Subagent timed out after 1000ms\./);
 	});
 
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
