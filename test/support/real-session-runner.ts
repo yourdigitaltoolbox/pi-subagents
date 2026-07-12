@@ -7,18 +7,20 @@ import {
 	type Context,
 	type FauxContentBlock,
 	type FauxResponseStep,
+	createFauxCore,
 	fauxAssistantMessage,
 	fauxText,
 	fauxToolCall,
-	registerFauxProvider,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
+	AuthStorage,
 	type AgentSession,
 	type AgentSessionEvent,
-	type ModelRegistry,
 	createAgentSession,
 	DefaultResourceLoader,
+	type ExtensionAPI,
+	ModelRegistry,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -98,19 +100,6 @@ function toAssistantMessage(reply: FauxReply): AssistantMessage {
 	return fauxAssistantMessage(content, { stopReason: hasToolCall ? "toolUse" : "stop" });
 }
 
-function createModelRegistry(model: { provider: string; id: string }) {
-	return {
-		find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
-		getAll: () => [model],
-		getAvailable: () => [model],
-		hasConfiguredAuth: () => true,
-		isUsingOAuth: () => false,
-		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
-		registerProvider: () => {},
-		unregisterProvider: () => {},
-	};
-}
-
 function installChildPiShim(childText: string): () => void {
 	const rootDir = mkdtempSync(path.join(os.tmpdir(), "pi-real-session-cli-"));
 	const binDir = path.join(rootDir, "bin");
@@ -183,7 +172,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 	]);
 	const uninstallChildPi = installChildPiShim(options.childText);
 	let session: AgentSession | undefined;
-	let faux: ReturnType<typeof registerFauxProvider> | undefined;
+	let faux: ReturnType<typeof createFauxCore> | undefined;
 	let disposed = false;
 
 	const dispose = async () => {
@@ -195,7 +184,6 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		try {
 			session?.dispose();
 		} catch {}
-		faux?.unregister();
 		uninstallChildPi();
 		restoreEnv(envSnapshot);
 		try {
@@ -219,14 +207,33 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		delete process.env.PI_SUBAGENT_PI_BINARY;
 		delete process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
 
-		faux = registerFauxProvider({
-			provider: "faux-e2e-parent",
+		const fauxProviderName = "faux-e2e-parent";
+		faux = createFauxCore({
+			provider: fauxProviderName,
 			models: [{ id: "parent", contextWindow: 200_000 }],
 		});
 		const model = faux.getModel();
 		const respond = options.respond;
 		const responseFactory: FauxResponseStep = async (context, _streamOptions, state) => toAssistantMessage(await respond(context, state));
 		faux.setResponses(Array.from({ length: 8 }, () => responseFactory));
+		const providerExtension = (pi: ExtensionAPI) => {
+			pi.registerProvider(fauxProviderName, {
+				api: faux.api,
+				apiKey: "disposable-test-key",
+				baseUrl: "http://localhost.invalid",
+				models: faux.models.map((candidate) => ({
+					id: candidate.id,
+					name: candidate.name,
+					api: candidate.api,
+					reasoning: candidate.reasoning,
+					input: candidate.input,
+					cost: candidate.cost,
+					contextWindow: candidate.contextWindow,
+					maxTokens: candidate.maxTokens,
+				})),
+				streamSimple: (candidate, context, streamOptions) => faux!.streamSimple(candidate, context, streamOptions),
+			});
+		};
 
 		const settingsManager = SettingsManager.inMemory({
 			compaction: { enabled: false },
@@ -237,6 +244,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 			agentDir: home,
 			settingsManager,
 			additionalExtensionPaths: [EXTENSION_PATH],
+			extensionFactories: [providerExtension],
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
@@ -244,12 +252,19 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 			systemPrompt: "You are an E2E parent. Delegate with the subagent tool, then report the tool result.",
 		});
 		await loader.reload();
+		const extensionErrors = loader.getExtensions().errors;
+		if (extensionErrors.length > 0) {
+			throw new Error(`Unable to load E2E extension: ${extensionErrors.map((entry) => `${entry.path}: ${entry.error}`).join("; ")}`);
+		}
 
+		const authStorage = AuthStorage.inMemory();
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		const created = await createAgentSession({
 			cwd,
 			agentDir: home,
+			authStorage,
 			model,
-			modelRegistry: createModelRegistry(model) as unknown as ModelRegistry,
+			modelRegistry,
 			resourceLoader: loader,
 			sessionManager: SessionManager.create(cwd, path.join(home, "sessions")),
 			settingsManager,
@@ -266,6 +281,9 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		});
 
 		await session.bindExtensions({});
+		if (!session.extensionRunner.getToolDefinition("subagent")) {
+			throw new Error(`E2E extension did not register the subagent tool; loaded paths: ${session.extensionRunner.getExtensionPaths().join(", ")}`);
+		}
 		const timeoutMs = options.timeoutMs ?? 30_000;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {

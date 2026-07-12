@@ -77,7 +77,8 @@ describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packag
 			});
 
 			const toolResults = subagentToolResults(run.parentSession);
-			assert.equal(toolResults.length, 1);
+			assert.ok(run.modelCalls >= 1, `expected the parent model to run; calls: ${run.modelCalls}`);
+			assert.equal(toolResults.length, 1, `expected parent to call subagent; response was: ${run.responseText}; model calls: ${run.modelCalls}`);
 			assert.match(toolResults[0]!, new RegExp(CHILD_MARKER));
 			assert.match(run.responseText, new RegExp(CHILD_MARKER));
 			assert.doesNotMatch(run.responseText, /CHILD_MISSING/);
