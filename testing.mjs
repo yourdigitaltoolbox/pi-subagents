@@ -7,12 +7,13 @@ const { sendCompletion } = requireTypeScript("./src/runs/background/notify.ts");
 
 const CONSUMER = "pi-subagents";
 
-function frozenReceipt(id, outcome, snapshot, notificationCount, laneId) {
+function frozenReceipt(id, outcome, snapshot, notificationCount, laneId, dispatchSequence) {
 	return Object.freeze({
 		consumer: CONSUMER,
 		id,
 		outcome,
 		...(laneId === undefined ? {} : { laneId }),
+		...(dispatchSequence === undefined ? {} : { dispatchSequence }),
 		...(snapshot.operationId === undefined ? {} : { operationId: snapshot.operationId }),
 		...(snapshot.generationId === undefined ? {} : { generationId: snapshot.generationId }),
 		...(notificationCount === undefined ? {} : { notificationCount }),
@@ -53,6 +54,7 @@ export function createExactCandidateProbe(options) {
 	const pendingDeliveries = new Set();
 	let disposed = false;
 	let injectionInFlight = false;
+	let nextDispatchSequence = 0;
 
 	const record = (receipt) => {
 		receipts.push(receipt);
@@ -63,8 +65,10 @@ export function createExactCandidateProbe(options) {
 		const count = batch.items.length + batch.overflowCount;
 		const snapshot = gateSnapshot();
 		let sent;
+		let dispatchSequence;
 		sendCompletion({
 			sendMessage(message, deliveryOptions) {
+				dispatchSequence = ++nextDispatchSequence;
 				sent = options.session.sendCustomMessage(message, deliveryOptions);
 			},
 		}, batch.items.map((completion) => ({
@@ -74,8 +78,8 @@ export function createExactCandidateProbe(options) {
 		})), batch.overflowCount);
 		for (const completion of batch.items) {
 			const delivery = Promise.resolve(sent).then(
-				() => record(frozenReceipt(completion.id, outcome, snapshot, count, outcome === "released" ? laneId : undefined)),
-				() => record(frozenReceipt(completion.id, "rejected", snapshot, 0)),
+				() => record(frozenReceipt(completion.id, outcome, snapshot, count, outcome === "released" ? laneId : undefined, dispatchSequence)),
+				() => record(frozenReceipt(completion.id, "rejected", snapshot, 0, undefined, dispatchSequence)),
 			);
 			pendingDeliveries.add(delivery);
 			void delivery.finally(() => pendingDeliveries.delete(delivery));

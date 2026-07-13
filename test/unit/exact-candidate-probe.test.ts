@@ -7,7 +7,7 @@ const SESSION_ID = "exact-candidate-session";
 const GENERATION_ID = "exact-candidate-generation";
 const OPERATION_ID = "exact-candidate-operation";
 
-test("archive testing probe holds completion delivery during compaction and releases through production notification delivery", async () => {
+test("archive testing probe records dispatch order when failure-success delivery promises settle inversely", async () => {
 	const registry = registryForHost(globalThis);
 	assert.equal(registry.snapshot().registryState, "unavailable", "test must not inherit a lifecycle owner");
 	let phase: "compacting" | "idle" = "compacting";
@@ -35,10 +35,12 @@ test("archive testing probe holds completion delivery during compaction and rele
 		operationId: OPERATION_ID,
 	});
 	const sent: unknown[] = [];
+	const pendingSends: Array<{ resolve(): void }> = [];
 	const session = {
 		sessionId: SESSION_ID,
-		async sendCustomMessage(message: unknown, options: unknown) {
+		sendCustomMessage(message: unknown, options: unknown) {
 			sent.push({ message, options });
+			return new Promise<void>((resolve) => pendingSends.push({ resolve }));
 		},
 	};
 	const probe = createExactCandidateProbe({ session: session as never, seed: 6607, packageDirectory: process.cwd() });
@@ -81,15 +83,23 @@ test("archive testing probe holds completion delivery during compaction and rele
 			} as never);
 			assert.equal(acknowledgement.disposition, "submitted");
 		}
+		assert.equal(sent.length, 2);
+		assert.equal(pendingSends.length, 2);
+		// Failure dispatches first, but its promise settles after success.
+		pendingSends[1]!.resolve();
+		pendingSends[0]!.resolve();
 		const observations = await probe.observations();
 		assert.equal(Object.isFrozen(observations), true);
-		assert.deepEqual(observations.map((receipt) => [receipt.id, receipt.outcome, receipt.laneId, receipt.notificationCount]), [
-			["success-1", "held", "subagent-success", 0],
-			["failure-1", "held", "failure-attention-decision", 0],
-			["failure-1", "released", "failure-attention-decision", 1],
-			["success-1", "released", "subagent-success", 1],
+		assert.deepEqual(observations.map((receipt) => [receipt.id, receipt.outcome, receipt.laneId, receipt.notificationCount, receipt.dispatchSequence]), [
+			["success-1", "held", "subagent-success", 0, undefined],
+			["failure-1", "held", "failure-attention-decision", 0, undefined],
+			["success-1", "released", "subagent-success", 1, 2],
+			["failure-1", "released", "failure-attention-decision", 1, 1],
 		]);
-		assert.equal(sent.length, 2);
+		assert.deepEqual(
+			observations.filter((receipt) => receipt.outcome === "released").toSorted((left, right) => left.dispatchSequence! - right.dispatchSequence!).map((receipt) => receipt.id),
+			["failure-1", "success-1"],
+		);
 		assert.deepEqual(sent.map((entry) => entry as { message: { content?: string }; options: unknown }), [
 			{ message: { customType: "subagent-notify", content: "Background task failed: **subagent**\n\nSubagent completion notification", display: true }, options: { triggerTurn: true } },
 			{ message: { customType: "subagent-notify", content: "Background task completed: **subagent**\n\nSubagent completion notification", display: true }, options: { triggerTurn: true } },

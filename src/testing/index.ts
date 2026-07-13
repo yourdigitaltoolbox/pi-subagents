@@ -13,6 +13,8 @@ export interface ExactCandidateProbeReceipt {
 	outcome: "accepted" | "held" | "released" | "rejected";
 	/** Present only for held and released receipts from the actual lifecycle gate lane. */
 	laneId?: "failure-attention-decision" | "subagent-success";
+	/** Monotonic per-probe sequence allocated synchronously at completion-batch dispatch. */
+	dispatchSequence?: number;
 	operationId?: string;
 	generationId?: string;
 	notificationCount?: number;
