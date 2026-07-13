@@ -85,7 +85,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.80.6",
-    "@yourdigitaltoolbox/pi-context-lifecycle": "git+https://github.com/yourdigitaltoolbox/pi-context-lifecycle.git#93b8a6ddc17d32c4bf577248bfbd757a3edc3fb4",
+    "@yourdigitaltoolbox/pi-context-lifecycle": "git+https://github.com/yourdigitaltoolbox/pi-context-lifecycle.git#db19434b5785edefd6baf4781cb70399d0b8f6f3",
     "jiti": "2.7.0",
     "typebox": "1.1.24"
   },
