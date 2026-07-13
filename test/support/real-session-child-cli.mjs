@@ -4,13 +4,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	createFauxCore,
 	fauxAssistantMessage,
 	fauxText,
-	registerFauxProvider,
 } from "@earendil-works/pi-ai";
 import {
+	AuthStorage,
 	createAgentSession,
 	DefaultResourceLoader,
+	ModelRegistry,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -85,19 +87,6 @@ function parseArgs(argv) {
 	return parsed;
 }
 
-function createModelRegistry(model) {
-	return {
-		find: (provider, id) => provider === model.provider && id === model.id ? model : undefined,
-		getAll: () => [model],
-		getAvailable: () => [model],
-		hasConfiguredAuth: () => true,
-		isUsingOAuth: () => false,
-		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
-		registerProvider: () => {},
-		unregisterProvider: () => {},
-	};
-}
-
 function createSessionManager(parsed, cwd) {
 	if (parsed.sessionFile) {
 		const sessionDir = parsed.sessionDir ?? path.dirname(parsed.sessionFile);
@@ -118,8 +107,9 @@ async function main() {
 		: mkdtempSync(path.join(os.tmpdir(), "pi-e2e-agent-dir-"));
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? ownedAgentDir;
 
-	const faux = registerFauxProvider({
-		provider: "faux-e2e-child",
+	const fauxProviderName = "faux-e2e-child";
+	const faux = createFauxCore({
+		provider: fauxProviderName,
 		models: [{ id: "child", contextWindow: 200_000 }],
 	});
 	const model = faux.getModel();
@@ -131,10 +121,29 @@ async function main() {
 		compaction: { enabled: false },
 		retry: { enabled: false },
 	});
+	const providerExtension = (pi) => {
+		pi.registerProvider(fauxProviderName, {
+			api: faux.api,
+			apiKey: "disposable-test-key",
+			baseUrl: "http://localhost.invalid",
+			models: faux.models.map((candidate) => ({
+				id: candidate.id,
+				name: candidate.name,
+				api: candidate.api,
+				reasoning: candidate.reasoning,
+				input: candidate.input,
+				cost: candidate.cost,
+				contextWindow: candidate.contextWindow,
+				maxTokens: candidate.maxTokens,
+			})),
+			streamSimple: (candidate, context, streamOptions) => faux.streamSimple(candidate, context, streamOptions),
+		});
+	};
 	const loader = new DefaultResourceLoader({
 		cwd,
 		agentDir,
 		settingsManager,
+		extensionFactories: [providerExtension],
 		additionalExtensionPaths: parsed.extensions,
 		noSkills: parsed.noSkills,
 		noPromptTemplates: true,
@@ -146,11 +155,14 @@ async function main() {
 
 	try {
 		await loader.reload();
+		const authStorage = AuthStorage.inMemory();
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir,
+			authStorage,
 			model,
-			modelRegistry: createModelRegistry(model),
+			modelRegistry,
 			resourceLoader: loader,
 			sessionManager: createSessionManager(parsed, cwd),
 			settingsManager,
@@ -173,7 +185,6 @@ async function main() {
 		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		session.dispose();
 	} finally {
-		faux.unregister();
 		if (ownedAgentDir) rmSync(ownedAgentDir, { recursive: true, force: true });
 	}
 }

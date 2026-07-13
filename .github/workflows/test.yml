@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,6 +21,8 @@ jobs:
           node-version: 24
       - name: Install devDependencies
         run: npm ci --ignore-scripts
+      - name: Build exact lifecycle test dependency
+        run: node scripts/build-context-lifecycle-ci-dependency.mjs
       - name: Unit tests
         run: npm test
       - name: Integration tests

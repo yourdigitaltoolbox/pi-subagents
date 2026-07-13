@@ -17,6 +17,11 @@ import {
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
+import type { LifecycleGateDisposition } from "./lifecycle-gate.ts";
+
+export interface LifecycleCompletionReceiver {
+	receiveBatch(entries: readonly { key: string; value: SubagentNotifyDetails }[]): LifecycleGateDisposition;
+}
 
 interface ChainStepResult {
 	agent: string;
@@ -63,6 +68,10 @@ export interface RegisterSubagentNotifyOptions {
 	batchConfig?: CompletionBatchConfig;
 	timers?: NotifyTimerApi;
 	now?: () => number;
+	lifecycle?: {
+		success: LifecycleCompletionReceiver;
+		failure: LifecycleCompletionReceiver;
+	};
 }
 
 function formatSessionLine(details: SubagentNotifyDetails): string | undefined {
@@ -98,11 +107,20 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	return blocks.join("\n").trimEnd();
 }
 
-function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
-	if (details.length === 0) return;
-	const content = details.length === 1
-		? formatSingleCompletion(details[0]!)
-		: formatGroupedCompletion(details);
+export function formatCompletionRollup(overflowCount: number): string | undefined {
+	if (!Number.isSafeInteger(overflowCount) || overflowCount <= 0) return undefined;
+	return `${overflowCount} additional completion${overflowCount === 1 ? "" : "s"} are represented by a bounded rollup; use subagent status to inspect retained results.`;
+}
+
+export function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: readonly SubagentNotifyDetails[], overflowCount = 0): void {
+	const rollup = formatCompletionRollup(overflowCount);
+	if (details.length === 0 && rollup === undefined) return;
+	const base = details.length === 0
+		? "Background completion rollup"
+		: details.length === 1
+			? formatSingleCompletion(details[0]!)
+			: formatGroupedCompletion([...details]);
+	const content = rollup ? `${base}\n\n${rollup}` : base;
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
@@ -183,7 +201,20 @@ export default function registerSubagentNotify(
 	const ttlMs = 10 * 60 * 1000;
 	const nowFn = options.now ?? Date.now;
 	const batchConfig = resolveCompletionBatchConfig(options.batchConfig);
-	const batchers = new Map<string, CompletionBatcher<SubagentNotifyDetails>>();
+	interface QueuedCompletion {
+		key: string;
+		details: SubagentNotifyDetails;
+	}
+	const batchers = new Map<string, CompletionBatcher<QueuedCompletion>>();
+	const dispatch = (items: readonly QueuedCompletion[], lane: "success" | "failure") => {
+		const details = items.map((item) => item.details);
+		const gate = lane === "success" ? options.lifecycle?.success : options.lifecycle?.failure;
+		if (gate) {
+			gate.receiveBatch(items.map((item) => ({ key: item.key, value: item.details })));
+			return;
+		}
+		sendCompletion(pi, details);
+	};
 	globalStore[batcherStoreKey] = {
 		dispose() {
 			for (const batcher of batchers.values()) batcher.dispose();
@@ -199,12 +230,13 @@ export default function registerSubagentNotify(
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
 
 		const details = buildCompletionDetails(result);
+		const queued = { key, details };
 		const batchKey = completionBatchKey(result);
 		let batcher = batchers.get(batchKey);
 		if (!batcher) {
-			batcher = createCompletionBatcher<SubagentNotifyDetails>({
+			batcher = createCompletionBatcher<QueuedCompletion>({
 				config: batchConfig,
-				emit: (items) => sendCompletion(pi, items),
+				emit: (items) => dispatch(items, "success"),
 				...(options.timers ? { timers: options.timers } : {}),
 				now: nowFn,
 			});
@@ -215,10 +247,10 @@ export default function registerSubagentNotify(
 			// successes for the same owner first so they are not stranded
 			// behind this signal, then emit the non-completion result immediately.
 			batcher.flush();
-			sendCompletion(pi, [details]);
+			dispatch([queued], "failure");
 			return;
 		}
-		batcher.push(details);
+		batcher.push(queued);
 	};
 
 	globalStore[unsubscribeStoreKey] = pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete);

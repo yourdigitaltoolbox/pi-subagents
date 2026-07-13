@@ -1547,6 +1547,10 @@ For prompt-template chains, use:
 
 Each named prompt becomes a native `subagent` chain step. This is intentionally scoped to subagent workflows; compare-style prompt features such as `/best-of-n` are not part of the built-in adapter.
 
+## Exact-candidate testing
+
+Archive-based lifecycle candidates can import the test-only `pi-subagents/testing` subpath. It exports `createExactCandidateProbe({ session, seed, packageDirectory })`, which accepts only opaque completion IDs and `success`/`failure` outcomes. The probe drives the normal lifecycle admission gate and delivers through the public `AgentSession` custom-message API; observations contain only opaque IDs, admission outcomes, and optional operation/generation/count metadata. It exposes no coordinator controls, notification bodies, or production runtime controls.
+
 ## Runtime files
 
 The main runtime files are:

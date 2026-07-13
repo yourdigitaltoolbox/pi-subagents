@@ -14,6 +14,9 @@ if (process.env.PI_SUBAGENTS_TEST_USE_REAL_SETTINGS !== "1") {
 		if (name.startsWith("PI_SUBAGENT_")) delete process.env[name];
 	}
 	delete process.env.REMOTE_PI_DIRECT_CONFIG;
+	// Tests exercise legacy paths deliberately; production defaults to managed
+	// lifecycle authority and fails closed when it is unavailable.
+	process.env.PI_SUBAGENTS_CONTEXT_LIFECYCLE_MODE = "compatibility";
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-test-home-"));
 	delete process.env.PI_CODING_AGENT_DIR;
 	process.env.HOME = root;

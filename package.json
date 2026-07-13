@@ -25,8 +25,15 @@
   "bin": {
     "pi-subagents": "install.mjs"
   },
+  "exports": {
+    "./testing": {
+      "types": "./src/testing/index.ts",
+      "import": "./testing.mjs"
+    }
+  },
   "files": [
     "src/**/*.ts",
+    "testing.mjs",
     "*.mjs",
     "agents/",
     "skills/**/*",
@@ -77,13 +84,14 @@
     }
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.74.0",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@yourdigitaltoolbox/pi-context-lifecycle": "git+https://github.com/yourdigitaltoolbox/pi-context-lifecycle.git#56cbb347e60e54f301f379e97248f52a2edfb5a5",
     "jiti": "2.7.0",
     "typebox": "1.1.24"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.74.0",
-    "@earendil-works/pi-ai": "0.74.0",
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6"
   }
 }
