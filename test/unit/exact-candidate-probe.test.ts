@@ -49,6 +49,7 @@ test("archive testing probe holds completion delivery during compaction and rele
 			consumer: "pi-subagents",
 			id: "success-1",
 			outcome: "held",
+			laneId: "subagent-success",
 			operationId: OPERATION_ID,
 			generationId: GENERATION_ID,
 			notificationCount: 0,
@@ -57,6 +58,7 @@ test("archive testing probe holds completion delivery during compaction and rele
 			consumer: "pi-subagents",
 			id: "failure-1",
 			outcome: "held",
+			laneId: "failure-attention-decision",
 			operationId: OPERATION_ID,
 			generationId: GENERATION_ID,
 			notificationCount: 0,
@@ -81,11 +83,11 @@ test("archive testing probe holds completion delivery during compaction and rele
 		}
 		const observations = await probe.observations();
 		assert.equal(Object.isFrozen(observations), true);
-		assert.deepEqual(observations.map((receipt) => [receipt.id, receipt.outcome, receipt.notificationCount]), [
-			["success-1", "held", 0],
-			["failure-1", "held", 0],
-			["failure-1", "released", 1],
-			["success-1", "released", 1],
+		assert.deepEqual(observations.map((receipt) => [receipt.id, receipt.outcome, receipt.laneId, receipt.notificationCount]), [
+			["success-1", "held", "subagent-success", 0],
+			["failure-1", "held", "failure-attention-decision", 0],
+			["failure-1", "released", "failure-attention-decision", 1],
+			["success-1", "released", "subagent-success", 1],
 		]);
 		assert.equal(sent.length, 2);
 		assert.deepEqual(sent.map((entry) => entry as { message: { content?: string }; options: unknown }), [

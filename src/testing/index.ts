@@ -11,6 +11,8 @@ export interface ExactCandidateProbeReceipt {
 	consumer: "pi-subagents";
 	id: string;
 	outcome: "accepted" | "held" | "released" | "rejected";
+	/** Present only for held and released receipts from the actual lifecycle gate lane. */
+	laneId?: "failure-attention-decision" | "subagent-success";
 	operationId?: string;
 	generationId?: string;
 	notificationCount?: number;

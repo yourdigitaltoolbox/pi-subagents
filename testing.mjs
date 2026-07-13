@@ -7,11 +7,12 @@ const { sendCompletion } = requireTypeScript("./src/runs/background/notify.ts");
 
 const CONSUMER = "pi-subagents";
 
-function frozenReceipt(id, outcome, snapshot, notificationCount) {
+function frozenReceipt(id, outcome, snapshot, notificationCount, laneId) {
 	return Object.freeze({
 		consumer: CONSUMER,
 		id,
 		outcome,
+		...(laneId === undefined ? {} : { laneId }),
 		...(snapshot.operationId === undefined ? {} : { operationId: snapshot.operationId }),
 		...(snapshot.generationId === undefined ? {} : { generationId: snapshot.generationId }),
 		...(notificationCount === undefined ? {} : { notificationCount }),
@@ -57,7 +58,7 @@ export function createExactCandidateProbe(options) {
 		receipts.push(receipt);
 		return receipt;
 	};
-	const deliver = (batch) => {
+	const deliverFromGate = (laneId) => (batch) => {
 		const outcome = injectionInFlight ? "accepted" : "released";
 		const count = batch.items.length + batch.overflowCount;
 		const snapshot = gateSnapshot();
@@ -73,7 +74,7 @@ export function createExactCandidateProbe(options) {
 		})), batch.overflowCount);
 		for (const completion of batch.items) {
 			const delivery = Promise.resolve(sent).then(
-				() => record(frozenReceipt(completion.id, outcome, snapshot, count)),
+				() => record(frozenReceipt(completion.id, outcome, snapshot, count, outcome === "released" ? laneId : undefined)),
 				() => record(frozenReceipt(completion.id, "rejected", snapshot, 0)),
 			);
 			pendingDeliveries.add(delivery);
@@ -91,7 +92,7 @@ export function createExactCandidateProbe(options) {
 		mode: "managed",
 		consumerId: PI_SUBAGENTS_LIFECYCLE_CONSUMER_ID,
 		getSessionId: () => options.session.sessionId,
-		emit: deliver,
+		emit: deliverFromGate("subagent-success"),
 		source: "pi-subagents-exact-candidate",
 	});
 	const failureGate = new LifecycleGate({
@@ -99,7 +100,7 @@ export function createExactCandidateProbe(options) {
 		mode: "managed",
 		consumerId: PI_SUBAGENTS_LIFECYCLE_CONSUMER_ID,
 		getSessionId: () => options.session.sessionId,
-		emit: deliver,
+		emit: deliverFromGate("failure-attention-decision"),
 		source: "pi-subagents-exact-candidate",
 	});
 
@@ -117,7 +118,7 @@ export function createExactCandidateProbe(options) {
 		} finally {
 			injectionInFlight = false;
 		}
-		if (disposition === "held") return record(frozenReceipt(input.id, "held", authoritySnapshot(), 0));
+		if (disposition === "held") return record(frozenReceipt(input.id, "held", authoritySnapshot(), 0, input.outcome === "success" ? "subagent-success" : "failure-attention-decision"));
 		if (disposition === "blocked") return record(frozenReceipt(input.id, "rejected", authoritySnapshot(), 0));
 		await settleDeliveries();
 		return receipts.at(-1);
