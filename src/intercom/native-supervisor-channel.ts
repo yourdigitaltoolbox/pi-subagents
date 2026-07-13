@@ -20,6 +20,7 @@ const REQUESTS_DIR = "requests";
 const REPLIES_DIR = "replies";
 export const NATIVE_SUPERVISOR_TOOL_NAME = "subagent_supervisor";
 export const NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME = "request_relay_exposure";
+export const NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE = "subagent_supervisor_request";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
@@ -531,6 +532,27 @@ function requestMatchesContext(request: SupervisorRequest, state: Pick<SubagentS
 	return Boolean(currentSessionId && request.orchestratorSessionId === currentSessionId);
 }
 
+/**
+ * `sendMessage()` is persisted when Pi forks a session. Keep an inherited
+ * supervisor request out of every non-target session's model context.
+ */
+export function stripForeignSupervisorRequests(messages: unknown[], sessionId: string | undefined): unknown[] {
+	let changed = false;
+	const filtered = messages.filter((message) => {
+		if (!message || typeof message !== "object") return true;
+		const candidate = message as { role?: unknown; customType?: unknown; details?: unknown };
+		if (candidate.role !== "custom" || candidate.customType !== NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE) return true;
+		const details = candidate.details;
+		const targetSessionId = details && typeof details === "object"
+			? (details as { orchestratorSessionId?: unknown }).orchestratorSessionId
+			: undefined;
+		const keep = typeof sessionId === "string" && targetSessionId === sessionId;
+		if (!keep) changed = true;
+		return keep;
+	});
+	return changed ? filtered : messages;
+}
+
 function removeRequestFile(file: string): void {
 	try {
 		fs.rmSync(file, { force: true });
@@ -718,18 +740,28 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				removeRequestFile(request.requestFile);
 			}
 			pi.sendMessage({
-				customType: "subagent_supervisor_request",
+				customType: NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE,
 				content: requestVisibleText(request),
-				display: true,
+				// The message must reach the target parent model, but Pi persists
+				// custom messages into later session forks. Use an ephemeral UI
+				// notice and scope the persisted model message below instead.
+				display: false,
 				details: {
 					id: request.id,
 					reason: request.reason,
 					expectsReply: request.expectsReply,
+					orchestratorSessionId: request.orchestratorSessionId,
 					runId: request.runId,
 					agent: request.agent,
 					childIndex: request.childIndex,
 				},
 			});
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`Supervisor ${request.expectsReply ? "request" : "update"}: ${request.agent} (${request.reason})`,
+					request.expectsReply ? "warning" : "info",
+				);
+			}
 			if (request.expectsReply || request.reason === "relay_exposure") {
 				(pi as { events?: IntercomEventBus }).events?.emit(INTERCOM_DETACH_REQUEST_EVENT, {
 					requestId: request.id,

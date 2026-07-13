@@ -6,11 +6,13 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 import {
 	NATIVE_RELAY_EXPOSURE_REQUEST_TOOL_NAME,
+	NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE,
 	NATIVE_SUPERVISOR_TOOL_NAME,
 	createNativeSupervisorChannel,
 	ensureSupervisorChannelDir,
 	registerNativeSupervisorClient,
 	resolveSupervisorChannelDir,
+	stripForeignSupervisorRequests,
 } from "../../src/intercom/native-supervisor-channel.ts";
 import {
 	SUBAGENT_CHILD_AGENT_ENV,
@@ -109,12 +111,44 @@ afterEach(() => {
 });
 
 describe("native supervisor channel", () => {
+	it("keeps supervisor messages only in their target parent context", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const foreignSessionId = `session-${randomUUID()}`;
+		const user = { role: "user", content: "Continue" };
+		const targetRequest = {
+			role: "custom",
+			customType: NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE,
+			content: "Target request",
+			details: { orchestratorSessionId: currentSessionId },
+		};
+		const inheritedRequest = {
+			role: "custom",
+			customType: NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE,
+			content: "Inherited request",
+			details: { orchestratorSessionId: foreignSessionId },
+		};
+		const legacyRequest = {
+			role: "custom",
+			customType: NATIVE_SUPERVISOR_REQUEST_MESSAGE_TYPE,
+			content: "Unscoped legacy request",
+		};
+
+		assert.deepEqual(
+			stripForeignSupervisorRequests([user, targetRequest, inheritedRequest, legacyRequest], currentSessionId),
+			[user, targetRequest],
+		);
+		assert.deepEqual(
+			stripForeignSupervisorRequests([user, targetRequest], foreignSessionId),
+			[user],
+		);
+	});
+
 	it("delivers requests only to the exact current session id", () => {
 		const currentSessionId = `session-${randomUUID()}`;
 		const otherSessionId = `session-${randomUUID()}`;
 		const matchingId = writeRequest({ sessionId: currentSessionId, runId: `run-${randomUUID()}` });
 		const otherId = writeRequest({ sessionId: otherSessionId, runId: `run-${randomUUID()}` });
-		const sent: Array<{ content?: string; details?: { id?: string } }> = [];
+		const sent: Array<{ content?: string; display?: boolean; details?: { id?: string; orchestratorSessionId?: string } }> = [];
 		const registeredTools: string[] = [];
 		const ctx = {
 			cwd: process.cwd(),
@@ -128,7 +162,7 @@ describe("native supervisor channel", () => {
 		const pi = {
 			getAllTools: () => [],
 			registerTool: (tool: { name: string }) => { registeredTools.push(tool.name); },
-			sendMessage: (message: { content?: string; details?: { id?: string } }) => { sent.push(message); },
+			sendMessage: (message: { content?: string; display?: boolean; details?: { id?: string; orchestratorSessionId?: string } }) => { sent.push(message); },
 			getSessionName: () => "shared-name",
 		};
 		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
@@ -139,6 +173,8 @@ describe("native supervisor channel", () => {
 
 		assert.deepEqual(registeredTools, [NATIVE_SUPERVISOR_TOOL_NAME, "intercom"]);
 		assert.deepEqual(sent.map((message) => message.details?.id), [matchingId]);
+		assert.equal(sent[0]?.display, false, "supervisor delivery is hidden from forked-session transcripts");
+		assert.equal(sent[0]?.details?.orchestratorSessionId, currentSessionId);
 		assert.equal(channel.pending.has(matchingId), false, "disposed channel clears pending requests");
 		assert.equal(sent.some((message) => message.details?.id === otherId), false);
 	});
