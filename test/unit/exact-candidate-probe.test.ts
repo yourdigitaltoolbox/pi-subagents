@@ -7,7 +7,7 @@ const SESSION_ID = "exact-candidate-session";
 const GENERATION_ID = "exact-candidate-generation";
 const OPERATION_ID = "exact-candidate-operation";
 
-test("archive testing probe routes redacted completion injections through the real lifecycle gate", async () => {
+test("archive testing probe holds completion delivery during compaction and releases through production notification delivery", async () => {
 	const registry = registryForHost(globalThis);
 	assert.equal(registry.snapshot().registryState, "unavailable", "test must not inherit a lifecycle owner");
 	let phase: "compacting" | "idle" = "compacting";
@@ -89,8 +89,8 @@ test("archive testing probe routes redacted completion injections through the re
 		]);
 		assert.equal(sent.length, 2);
 		assert.deepEqual(sent.map((entry) => entry as { message: { content?: string }; options: unknown }), [
-			{ message: { customType: "subagent-exact-candidate", content: "Subagent completion notification", display: false }, options: { triggerTurn: false } },
-			{ message: { customType: "subagent-exact-candidate", content: "Subagent completion notification", display: false }, options: { triggerTurn: false } },
+			{ message: { customType: "subagent-notify", content: "Background task failed: **subagent**\n\nSubagent completion notification", display: true }, options: { triggerTurn: true } },
+			{ message: { customType: "subagent-notify", content: "Background task completed: **subagent**\n\nSubagent completion notification", display: true }, options: { triggerTurn: true } },
 		]);
 		await assert.rejects(probe.inject({ consumer: "pi-subagents", kind: "completion", id: "bad", outcome: "paused" } as never), /completion injections only/);
 	} finally {

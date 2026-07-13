@@ -3,6 +3,7 @@ import { getContextLifecycleSnapshotV1 } from "@yourdigitaltoolbox/pi-context-li
 
 const requireTypeScript = createJiti(import.meta.url, { interopDefault: false });
 const { LifecycleGate, PI_SUBAGENTS_LIFECYCLE_CONSUMER_ID } = requireTypeScript("./src/runs/background/lifecycle-gate.ts");
+const { sendCompletion } = requireTypeScript("./src/runs/background/notify.ts");
 
 const CONSUMER = "pi-subagents";
 
@@ -59,13 +60,19 @@ export function createExactCandidateProbe(options) {
 	const deliver = (batch) => {
 		const outcome = injectionInFlight ? "accepted" : "released";
 		const count = batch.items.length + batch.overflowCount;
+		const snapshot = gateSnapshot();
+		let sent;
+		sendCompletion({
+			sendMessage(message, deliveryOptions) {
+				sent = options.session.sendCustomMessage(message, deliveryOptions);
+			},
+		}, batch.items.map((completion) => ({
+			agent: "subagent",
+			status: completion.outcome === "success" ? "completed" : "failed",
+			resultPreview: "Subagent completion notification",
+		})), batch.overflowCount);
 		for (const completion of batch.items) {
-			const snapshot = gateSnapshot();
-			const delivery = Promise.resolve(options.session.sendCustomMessage({
-				customType: "subagent-exact-candidate",
-				content: "Subagent completion notification",
-				display: false,
-			}, { triggerTurn: false })).then(
+			const delivery = Promise.resolve(sent).then(
 				() => record(frozenReceipt(completion.id, outcome, snapshot, count)),
 				() => record(frozenReceipt(completion.id, "rejected", snapshot, 0)),
 			);
