@@ -71,6 +71,28 @@ describe("subagent control notice delivery", () => {
 		assert.deepEqual(recorder.sent[0]?.options, { triggerTurn: true });
 	});
 
+	it("routes async attention into the failure-attention lifecycle lane without a parent turn", () => {
+		const state = makeState();
+		const recorder = makeRecorder();
+		const received: Array<{ key: string; details: unknown }> = [];
+		handleSubagentControlNotice({
+			pi: recorder.pi,
+			state,
+			visibleControlNotices: new Set(),
+			details: { source: "async", event: needsAttentionEvent() },
+			lifecycleGate: {
+				receive(key, details) {
+					received.push({ key, details });
+					return "held";
+				},
+			},
+		});
+
+		assert.equal(recorder.sent.length, 0);
+		assert.equal(received.length, 1);
+		assert.match(received[0]!.key, /needs_attention/);
+	});
+
 	it("queues foreground needs-attention notices until the same step is still actionable", async () => {
 		const state = makeState();
 		state.foregroundControls.set("run-1", {

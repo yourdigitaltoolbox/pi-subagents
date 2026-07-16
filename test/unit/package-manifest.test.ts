@@ -11,6 +11,12 @@ const oldPiScopePattern = /@mariozechner\/pi-/;
 const piPackageJsonSubpathPattern = /@earendil-works\/pi-[^"']+\/package\.json/;
 const cjsPiPackageResolutionPattern = /require(?:\.resolve)?\(\s*["']@earendil-works\/pi-/;
 const exactVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const exactGitCommitPattern = /^git\+https:\/\/github\.com\/yourdigitaltoolbox\/[\w.-]+\.git#[0-9a-f]{40}$/;
+
+function packageNameFromSpecifier(specifier: string): string {
+	const segments = specifier.split("/");
+	return segments.length >= 2 ? `${segments[0]!}/${segments[1]!}` : specifier;
+}
 
 function collectTsFiles(dir: string): string[] {
 	const files: string[] = [];
@@ -40,7 +46,7 @@ test("direct @earendil-works runtime imports are declared for CI installs", () =
 		}
 	}
 
-	const missing = [...imported].filter((specifier) => !declared.has(specifier)).sort();
+	const missing = [...imported].filter((specifier) => !declared.has(packageNameFromSpecifier(specifier))).sort();
 	assert.deepEqual(missing, []);
 });
 
@@ -49,7 +55,9 @@ test("direct dependency declarations are exact version pins", () => {
 
 	for (const section of ["dependencies", "devDependencies"] as const) {
 		for (const [name, version] of Object.entries<string>(packageJson[section] ?? {})) {
-			assert.match(version, exactVersionPattern, `${section}.${name} should use an exact version`);
+			const isExactRegistryVersion = exactVersionPattern.test(version);
+			const isExactLifecycleGitPin = name === "@yourdigitaltoolbox/pi-context-lifecycle" && exactGitCommitPattern.test(version);
+			assert.equal(isExactRegistryVersion || isExactLifecycleGitPin, true, `${section}.${name} should use an exact registry version or a full immutable lifecycle Git commit`);
 		}
 	}
 });

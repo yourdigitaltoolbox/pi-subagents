@@ -1,0 +1,2 @@
+# Child-session conformance digests cover exact fixture bytes across every CI runner.
+/conformance/child-session/*.json text eol=lf

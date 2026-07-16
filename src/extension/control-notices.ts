@@ -1,8 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { LifecycleGateDisposition } from "../runs/background/lifecycle-gate.ts";
 import { controlNotificationKey, formatControlNoticeMessage } from "../runs/shared/subagent-control.ts";
 import type { ControlEvent, SubagentState } from "../shared/types.ts";
 
 export const SUBAGENT_CONTROL_MESSAGE_TYPE = "subagent_control_notice";
+
+export interface LifecycleControlReceiver {
+	receive(key: string, value: SubagentControlMessageDetails): LifecycleGateDisposition;
+}
 
 export interface SubagentControlMessageDetails {
 	event: ControlEvent;
@@ -35,25 +40,58 @@ export function clearPendingForegroundControlNotices(state: SubagentState, runId
 	}
 }
 
+export function sendControlNotices(pi: Pick<ExtensionAPI, "sendMessage">, details: readonly SubagentControlMessageDetails[], overflowCount = 0): void {
+	const rollup = Number.isSafeInteger(overflowCount) && overflowCount > 0
+		? `${overflowCount} additional attention notification${overflowCount === 1 ? "" : "s"} are represented by a bounded rollup; inspect subagent status for retained control state.`
+		: undefined;
+	if (details.length === 0 && rollup === undefined) return;
+	if (details.length === 1 && rollup === undefined) {
+		const detail = details[0]!;
+		const childIntercomTarget = controlNoticeTarget(detail);
+		const noticeText = detail.noticeText ?? formatControlNoticeMessage(detail.event, childIntercomTarget);
+		pi.sendMessage(
+			{
+				customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
+				content: noticeText,
+				display: true,
+				details: { ...detail, childIntercomTarget, noticeText },
+			},
+			{ triggerTurn: detail.source !== "foreground" },
+		);
+		return;
+	}
+	pi.sendMessage(
+		{
+			customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
+			content: [
+				`Subagent attention notifications (${details.length + overflowCount})`,
+				"",
+				...details.map((detail, index) => `${index + 1}. ${detail.noticeText ?? formatControlNoticeMessage(detail.event, controlNoticeTarget(detail))}`),
+				...(rollup ? ["", rollup] : []),
+			].join("\n"),
+			display: true,
+		},
+		{ triggerTurn: true },
+	);
+}
+
 function deliverControlNotice(input: {
 	pi: Pick<ExtensionAPI, "sendMessage">;
 	visibleControlNotices: Set<string>;
 	details: SubagentControlMessageDetails;
+	lifecycleGate?: LifecycleControlReceiver;
 }): void {
 	const childIntercomTarget = controlNoticeTarget(input.details);
 	const key = controlNotificationKey(input.details.event, childIntercomTarget);
 	if (input.visibleControlNotices.has(key)) return;
 	input.visibleControlNotices.add(key);
 	const noticeText = input.details.noticeText ?? formatControlNoticeMessage(input.details.event, childIntercomTarget);
-	input.pi.sendMessage(
-		{
-			customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
-			content: noticeText,
-			display: true,
-			details: { ...input.details, childIntercomTarget, noticeText },
-		},
-		{ triggerTurn: input.details.source !== "foreground" },
-	);
+	const enriched = { ...input.details, childIntercomTarget, noticeText };
+	if (input.lifecycleGate) {
+		input.lifecycleGate.receive(key, enriched);
+		return;
+	}
+	sendControlNotices(input.pi, [enriched]);
 }
 
 function isForegroundNoticeStillActionable(state: SubagentState, details: SubagentControlMessageDetails): boolean {
@@ -70,6 +108,7 @@ export function handleSubagentControlNotice(input: {
 	visibleControlNotices: Set<string>;
 	details: SubagentControlMessageDetails;
 	foregroundDelayMs?: number;
+	lifecycleGate?: LifecycleControlReceiver;
 }): void {
 	if (!input.details?.event || input.details.event.type === "active_long_running") return;
 	if (input.details.source !== "foreground") {

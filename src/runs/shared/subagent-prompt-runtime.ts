@@ -42,6 +42,8 @@ const PARENT_ONLY_CUSTOM_MESSAGE_TYPES = new Set([
 	"subagent-slash-result",
 	"subagent-slash-text-result",
 	"subagent-notify",
+	"subagent-lifecycle-alert",
+	"subagent-lifecycle-blocked",
 	"subagent_control_notice",
 	"subagent-control",
 	"subagent-control-notice",

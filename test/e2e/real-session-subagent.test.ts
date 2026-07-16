@@ -77,7 +77,8 @@ describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packag
 			});
 
 			const toolResults = subagentToolResults(run.parentSession);
-			assert.equal(toolResults.length, 1);
+			assert.ok(run.modelCalls >= 1, `expected the parent model to run; calls: ${run.modelCalls}`);
+			assert.equal(toolResults.length, 1, `expected parent to call subagent; response was: ${run.responseText}; model calls: ${run.modelCalls}`);
 			assert.match(toolResults[0]!, new RegExp(CHILD_MARKER));
 			assert.match(run.responseText, new RegExp(CHILD_MARKER));
 			assert.doesNotMatch(run.responseText, /CHILD_MISSING/);
@@ -90,5 +91,44 @@ describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packag
 				else process.env[key] = value;
 			}
 		}
+	});
+
+	it("preserves quota across reload and renews it only after Pi emits session_compact", async () => {
+		const { runRealSubagentSession, subagentCall, subagentToolResults } = await import("../support/real-session-runner.ts");
+		const subagentArgs = {
+			agent: "worker",
+			task: "Return the marker from the faux child provider.",
+			context: "fresh",
+			agentScope: "project",
+		};
+		run = await runRealSubagentSession({
+			prompt: "Run the first worker.",
+			childText: CHILD_MARKER,
+			subagentConfig: { maxSubagentSpawnsPerSession: 1 },
+			respond: (context, state) => {
+				const isParent = (context.tools ?? []).some((tool) => tool.name === "subagent");
+				if (!isParent) return "Unexpected non-parent model call.";
+				if (state.callCount === 1 || state.callCount === 3 || state.callCount === 5) return subagentCall(subagentArgs, `call-${state.callCount}`);
+				return "Parent completed its current turn.";
+			},
+		});
+		const first = subagentToolResults(run.parentSession);
+		assert.equal(first.length, 1);
+		assert.match(first[0]!, new RegExp(CHILD_MARKER));
+
+		await run.parentSession.reload();
+		const retainedQuota = (globalThis as Record<string, unknown>).__piSubagentSpawnQuotaBySession;
+		assert.ok(retainedQuota instanceof Map, "reload must retain the process-local quota registry");
+		assert.deepEqual([...retainedQuota.values()].map((entry) => (entry as { count: number }).count), [1]);
+		await run.parentSession.prompt("Try a second worker after reload but before compaction.", { expandPromptTemplates: false });
+		const beforeCompact = subagentToolResults(run.parentSession);
+		assert.equal(beforeCompact.length, 2);
+		assert.match(beforeCompact[1]!, /spawn limit reached/i);
+
+		await run.parentSession.extensionRunner.emit({ type: "session_compact", reason: "manual" });
+		await run.parentSession.prompt("Run a worker after successful compaction.", { expandPromptTemplates: false });
+		const afterCompact = subagentToolResults(run.parentSession);
+		assert.equal(afterCompact.length, 3);
+		assert.match(afterCompact[2]!, new RegExp(CHILD_MARKER));
 	});
 });

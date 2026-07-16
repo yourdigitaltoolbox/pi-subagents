@@ -1049,6 +1049,11 @@ export interface ScheduledRunsConfig {
 	maxPending?: number;
 }
 
+export interface ContextLifecycleConfig {
+	/** Managed is fail-closed when lifecycle authority is unavailable; compatibility is test/development fallback only. */
+	mode?: "managed" | "compatibility";
+}
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
@@ -1063,6 +1068,7 @@ export interface ExtensionConfig {
 	globalConcurrencyLimit?: number;
 	control?: ControlConfig;
 	completionBatch?: CompletionBatchConfig;
+	contextLifecycle?: ContextLifecycleConfig;
 	turnBudget?: TurnBudgetConfig;
 	toolBudget?: ToolBudgetConfig;
 	parallel?: TopLevelParallelConfig;
