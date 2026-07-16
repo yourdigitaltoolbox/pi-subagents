@@ -4,6 +4,8 @@ description: Parallel subagents research
 
 Launch parallel research subagents to build a grounded answer to the current question or decision.
 
+Apply the `cost-aware-model-routing` skill before launch. Use Luna for bounded source discovery and local inventory, Terra for ordinary evidence synthesis and tradeoff analysis, and Sol only to adjudicate a named high-risk or disputed conclusion. Pass models explicitly and require lower-tier researchers to report gaps instead of guessing.
+
 Use fresh context, not forked context, unless I explicitly ask for forked context. Researchers and scouts should inspect sources directly instead of relying on the main conversation history.
 
 Use a combination of `researcher` and `scout` subagents:

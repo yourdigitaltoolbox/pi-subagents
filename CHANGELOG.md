@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Added a bundled `cost-aware-model-routing` skill with Sol/Terra/Luna task routing, escalation and context-cost guidance, plus a privacy-safe response-deduplicated Pi session cost audit.
+
+### Changed
+- Updated subagent workflow guidance and prompt templates to select the cheapest capable model explicitly instead of inheriting an expensive parent model accidentally.
+
 ## [0.34.1] - 2026-07-11
 
 ### Added

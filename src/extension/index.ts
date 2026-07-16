@@ -33,7 +33,7 @@ import { registerSlashCommands } from "../slash/slash-commands.ts";
 import { registerPromptTemplateDelegationBridge } from "../slash/prompt-template-bridge.ts";
 import { registerMainWatchdog } from "../watchdog/register-main.ts";
 import { registerSlashSubagentBridge } from "../slash/slash-bridge.ts";
-import { createNativeSupervisorChannel } from "../intercom/native-supervisor-channel.ts";
+import { createNativeSupervisorChannel, stripForeignSupervisorRequests } from "../intercom/native-supervisor-channel.ts";
 import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
@@ -699,6 +699,12 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
 		primeExistingResults();
 	};
+
+	pi.on("context", (event, ctx) => {
+		const messages = stripForeignSupervisorRequests(event.messages, ctx.sessionManager.getSessionId() ?? undefined);
+		if (messages === event.messages) return undefined;
+		return { messages };
+	});
 
 	pi.on("session_start", (_event, ctx) => {
 		resetSessionState(ctx);

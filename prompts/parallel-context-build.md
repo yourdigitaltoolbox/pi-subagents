@@ -4,6 +4,8 @@ description: Parallel context builders for planning handoff
 
 Launch fresh-context `context-builder` subagents in parallel to build grounded handoff context for planning or implementation.
 
+Apply the `cost-aware-model-routing` skill before launch. Use Luna for bounded file maps/inventories and Terra for contextual synthesis or risk analysis. Reserve Sol for a separately named high-risk adjudication, not bulk context collection. Pass models explicitly and state each lower-tier stop condition.
+
 Use the `subagent` tool in chain mode with a single parallel step, not top-level parallel tasks, so relative output files live under the temporary chain directory. Use `context: "fresh"` unless I explicitly ask for forked context. Give every parallel task a distinct `output` path, `label`, and `as` name, for example:
 
 - `context-build/request-and-scope.md`

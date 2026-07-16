@@ -4,6 +4,8 @@ description: Parallel research/context builders into an implementation handoff p
 
 Use parallel subagents to understand the request, compare any external references, inspect the local codebase, and produce a grounded implementation handoff plan with a final implementation-ready meta-prompt.
 
+Apply the `cost-aware-model-routing` skill before launch. Route bounded source/file collection to Luna and normal research/context/synthesis to Terra. Use Sol only for a named architecture, authority/security, cross-repo contract, or conflicting-evidence adjudication. Pass models explicitly and keep high-cost synthesis limited to the decision-bearing artifact.
+
 Primary request, target, or focus:
 
 $@
