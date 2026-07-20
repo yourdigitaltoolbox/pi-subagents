@@ -13,7 +13,8 @@ import {
 	type ControlEvent,
 } from "../../src/shared/types.ts";
 
-const SESSION_ID = "managed-session";
+const LIFECYCLE_SESSION_ID = "managed-session";
+const RUN_SESSION_ID = path.join(os.tmpdir(), "managed-session.jsonl");
 const GENERATION_A = "managed-generation-a";
 const GENERATION_B = "managed-generation-b";
 
@@ -34,7 +35,7 @@ interface ManagedRuntime {
 function releasePermit(laneId: ReleasePermit["laneId"], generationId: string, cut: { watermark: number; heldCount: number }): ReleasePermit {
 	return Object.freeze({
 		protocolVersion: 1,
-		sessionId: SESSION_ID,
+		sessionId: LIFECYCLE_SESSION_ID,
 		generationId,
 		operationId: "managed-operation",
 		releaseId: `release-${laneId}-${generationId}`,
@@ -54,7 +55,7 @@ function createManagedRuntime(): ManagedRuntime {
 		protocolVersion: 1,
 		requestCompaction: () => ({ disposition: "rejected", code: "not-needed", generationId }),
 		admitWake(request, permit) {
-			if (request.sessionId !== SESSION_ID || request.generationId !== generationId) {
+			if (request.sessionId !== LIFECYCLE_SESSION_ID || request.generationId !== generationId) {
 				return { disposition: "reject", code: "generation-mismatch", generationId };
 			}
 			if (!permit && phase === "compacting") return { disposition: "hold", code: "compacting", generationId, operationId: "managed-operation", phase };
@@ -72,7 +73,7 @@ function createManagedRuntime(): ManagedRuntime {
 		diagnostics: () => [],
 	};
 	const publication = registry.publish("lifecycle-extension-runtime-test", publisher, {
-		sessionId: SESSION_ID,
+		sessionId: LIFECYCLE_SESSION_ID,
 		generationId,
 		phase,
 		operationId: "managed-operation",
@@ -110,8 +111,8 @@ function createManagedRuntime(): ManagedRuntime {
 			theme: { fg: (_name: string, text: string) => text, bg: (_name: string, text: string) => text, bold: (text: string) => text },
 		},
 		sessionManager: {
-			getSessionId: () => SESSION_ID,
-			getSessionFile: () => null,
+			getSessionId: () => LIFECYCLE_SESSION_ID,
+			getSessionFile: () => RUN_SESSION_ID,
 			getEntries: () => [],
 		},
 		modelRegistry: { getAvailable: () => [] },
@@ -125,7 +126,7 @@ function createManagedRuntime(): ManagedRuntime {
 			generationId = nextGenerationId;
 			phase = "compacting";
 			publication.update({
-				sessionId: SESSION_ID,
+				sessionId: LIFECYCLE_SESSION_ID,
 				generationId,
 				phase,
 				operationId: "managed-operation",
@@ -134,7 +135,7 @@ function createManagedRuntime(): ManagedRuntime {
 		setPhase(nextPhase: "compacting" | "idle") {
 			phase = nextPhase;
 			publication.update({
-				sessionId: SESSION_ID,
+				sessionId: LIFECYCLE_SESSION_ID,
 				generationId,
 				phase,
 				operationId: "managed-operation",
@@ -155,7 +156,7 @@ function completion(id: string) {
 		summary: `${id} complete`,
 		exitCode: 0,
 		timestamp: 1,
-		sessionId: SESSION_ID,
+		sessionId: RUN_SESSION_ID,
 	};
 }
 

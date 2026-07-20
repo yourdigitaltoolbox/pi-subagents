@@ -294,6 +294,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const lifecycleMode = resolveLifecycleGateMode(config.contextLifecycle?.mode);
+	let lifecycleSessionId: string | null = null;
 	const lifecycleBlocked = new Set<string>();
 	const reportLifecycleBlocked = (lane: string, code: string) => {
 		const key = `${lane}:${code}`;
@@ -308,7 +309,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const lifecycleSuccessGate = new LifecycleGate<SubagentNotifyDetails>({
 		laneId: "subagent-success",
 		mode: lifecycleMode,
-		getSessionId: () => state.currentSessionId,
+		getSessionId: () => lifecycleSessionId,
 		emit: (batch) => sendCompletion(pi, batch.items, batch.overflowCount),
 		onBlocked: (code) => reportLifecycleBlocked("success", code),
 		source: "pi-subagents-completion",
@@ -319,7 +320,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const lifecycleFailureGate = new LifecycleGate<LifecycleFailureNotice>({
 		laneId: "failure-attention-decision",
 		mode: lifecycleMode,
-		getSessionId: () => state.currentSessionId,
+		getSessionId: () => lifecycleSessionId,
 		emit: (batch) => {
 			const completions = batch.items.filter((item): item is { kind: "completion"; details: SubagentNotifyDetails } => item.kind === "completion").map((item) => item.details);
 			const controls = batch.items.filter((item): item is { kind: "control"; details: SubagentControlMessageDetails } => item.kind === "control").map((item) => item.details);
@@ -673,6 +674,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		state.baseCwd = ctx.cwd;
 		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
 		state.currentSessionId = sessionId;
+		lifecycleSessionId = ctx.sessionManager.getSessionId();
 		const retainedQuota = spawnQuotaBySession.get(sessionId);
 		const quota = retainedQuota && retainedQuota.sessionId === sessionId
 			? retainedQuota
@@ -723,6 +725,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 
 	pi.on("session_shutdown", (event) => {
 		if (event.reason !== "reload" && state.currentSessionId) spawnQuotaBySession.delete(state.currentSessionId);
+		lifecycleSessionId = null;
 		lifecycleSuccessGate.dispose();
 		lifecycleFailureGate.dispose();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];
