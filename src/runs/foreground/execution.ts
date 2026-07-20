@@ -1108,7 +1108,7 @@ async function runSingleAttempt(
 		durationMs: progress.durationMs,
 	};
 
-	const acceptanceOutput = getFinalOutput(result.messages);
+	let acceptanceOutput = getFinalOutput(result.messages);
 	let fullOutput = stripAcceptanceReport(acceptanceOutput);
 	if (result.timedOut) {
 		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
@@ -1148,6 +1148,7 @@ async function runSingleAttempt(
 	}
 		if (options.outputPath && result.exitCode === 0) {
 			const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
+			if (resolvedOutput.readFromConfiguredFile) acceptanceOutput = resolvedOutput.fullOutput;
 			fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
 			result.savedOutputPath = resolvedOutput.savedPath;
 			result.outputSaveError = resolvedOutput.saveError;

@@ -118,8 +118,8 @@ export function resolveSingleOutput(
 	outputPath: string | undefined,
 	fallbackOutput: string,
 	beforeRun: SingleOutputSnapshot | undefined,
-): { fullOutput: string; savedPath?: string; saveError?: string } {
-	if (!outputPath) return { fullOutput: fallbackOutput };
+): { fullOutput: string; savedPath?: string; saveError?: string; readFromConfiguredFile: boolean } {
+	if (!outputPath) return { fullOutput: fallbackOutput, readFromConfiguredFile: false };
 
 	let changedSinceStart = false;
 	try {
@@ -133,24 +133,26 @@ export function resolveSingleOutput(
 			return {
 				fullOutput: fallbackOutput,
 				saveError: `Failed to inspect output file: ${error instanceof Error ? error.message : String(error)}`,
+				readFromConfiguredFile: false,
 			};
 		}
 	}
 
 	if (changedSinceStart) {
 		try {
-			return { fullOutput: fs.readFileSync(outputPath, "utf-8"), savedPath: outputPath };
+			return { fullOutput: fs.readFileSync(outputPath, "utf-8"), savedPath: outputPath, readFromConfiguredFile: true };
 		} catch (error) {
 			return {
 				fullOutput: fallbackOutput,
 				saveError: `Failed to read changed output file: ${error instanceof Error ? error.message : String(error)}`,
+				readFromConfiguredFile: false,
 			};
 		}
 	}
 
 	const save = persistSingleOutput(outputPath, fallbackOutput);
-	if (save.savedPath) return { fullOutput: fallbackOutput, savedPath: save.savedPath };
-	return { fullOutput: fallbackOutput, saveError: save.error };
+	if (save.savedPath) return { fullOutput: fallbackOutput, savedPath: save.savedPath, readFromConfiguredFile: false };
+	return { fullOutput: fallbackOutput, saveError: save.error, readFromConfiguredFile: false };
 }
 
 export function finalizeSingleOutput(params: {

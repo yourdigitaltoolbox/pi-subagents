@@ -1257,7 +1257,7 @@ async function runSingleStep(
 		const note = turnBudgetSoftNote(turnBudget, turnBudget.wrapUpRequestedAtTurn ?? turnBudget.turnCount);
 		outputForSummary = outputForSummary.trim() ? `${note}\n\n${outputForSummary}` : note;
 	}
-	const outputForAcceptance = rawOutput;
+	const outputForAcceptance = resolvedOutput.readFromConfiguredFile ? resolvedOutput.fullOutput : rawOutput;
 	const finalizedOutput = finalizeSingleOutput({
 		fullOutput: outputForSummary,
 		outputPath: step.outputPath,
