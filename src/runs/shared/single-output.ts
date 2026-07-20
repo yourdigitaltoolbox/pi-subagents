@@ -1,11 +1,11 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { OutputMode, SavedOutputReference } from "../../shared/types.ts";
 
 export interface SingleOutputSnapshot {
-	exists: boolean;
-	mtimeMs?: number;
-	size?: number;
+	state: "missing" | "read" | "ambiguous";
+	digest?: string;
 }
 
 export function normalizeSingleOutputOverride(
@@ -89,14 +89,26 @@ export function validateFileOnlyOutputMode(outputMode: OutputMode | undefined, o
 	return undefined;
 }
 
+function errorCode(error: unknown): string | undefined {
+	return error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code as string | undefined : undefined;
+}
+
+function isMissingPathError(error: unknown): boolean {
+	const code = errorCode(error);
+	return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function contentDigest(content: string): string {
+	return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
 export function captureSingleOutputSnapshot(outputPath: string | undefined): SingleOutputSnapshot | undefined {
 	if (!outputPath) return undefined;
 	try {
-		const stat = fs.statSync(outputPath);
-		return { exists: true, mtimeMs: stat.mtimeMs, size: stat.size };
-	} catch {
-		// The snapshot is advisory; resolveSingleOutput reports concrete read/write failures.
-		return { exists: false };
+		return { state: "read", digest: contentDigest(fs.readFileSync(outputPath, "utf-8")) };
+	} catch (error) {
+		if (isMissingPathError(error)) return { state: "missing" };
+		return { state: "ambiguous" };
 	}
 }
 
@@ -121,32 +133,19 @@ export function resolveSingleOutput(
 ): { fullOutput: string; savedPath?: string; saveError?: string; readFromConfiguredFile: boolean } {
 	if (!outputPath) return { fullOutput: fallbackOutput, readFromConfiguredFile: false };
 
-	let changedSinceStart = false;
-	try {
-		const stat = fs.statSync(outputPath);
-		changedSinceStart = !beforeRun?.exists
-			|| stat.mtimeMs !== beforeRun.mtimeMs
-			|| stat.size !== beforeRun.size;
-	} catch (error) {
-		const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-		if (code !== "ENOENT" && code !== "ENOTDIR") {
-			return {
-				fullOutput: fallbackOutput,
-				saveError: `Failed to inspect output file: ${error instanceof Error ? error.message : String(error)}`,
-				readFromConfiguredFile: false,
-			};
-		}
-	}
-
-	if (changedSinceStart) {
+	if (beforeRun?.state === "read" || beforeRun?.state === "missing") {
 		try {
-			return { fullOutput: fs.readFileSync(outputPath, "utf-8"), savedPath: outputPath, readFromConfiguredFile: true };
+			const configuredOutput = fs.readFileSync(outputPath, "utf-8");
+			const changedSinceStart = beforeRun.state === "missing" || contentDigest(configuredOutput) !== beforeRun.digest;
+			if (changedSinceStart) return { fullOutput: configuredOutput, savedPath: outputPath, readFromConfiguredFile: true };
 		} catch (error) {
-			return {
-				fullOutput: fallbackOutput,
-				saveError: `Failed to read changed output file: ${error instanceof Error ? error.message : String(error)}`,
-				readFromConfiguredFile: false,
-			};
+			if (!isMissingPathError(error)) {
+				return {
+					fullOutput: fallbackOutput,
+					saveError: `Failed to read changed output file: ${error instanceof Error ? error.message : String(error)}`,
+					readFromConfiguredFile: false,
+				};
+			}
 		}
 	}
 

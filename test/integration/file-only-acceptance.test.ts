@@ -33,6 +33,10 @@ function malformedReport(): string {
 	return "# Reviewer report\n```acceptance-report\n{not-json\n```\n";
 }
 
+function sameSizeDifferentReport(): string {
+	return validReport().replace("file-only report", "tile-only report");
+}
+
 async function waitForMockSpawn(mockPi: MockPi, timeoutMs = 5_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (mockPi.callCount() === 0) {
@@ -45,6 +49,19 @@ async function writeAfterSnapshot(mockPi: MockPi, outputPath: string, contents: 
 	await waitForMockSpawn(mockPi);
 	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 	fs.writeFileSync(outputPath, contents, "utf8");
+}
+
+async function touchAfterSnapshot(mockPi: MockPi, outputPath: string): Promise<void> {
+	await waitForMockSpawn(mockPi);
+	fs.utimesSync(outputPath, new Date(), new Date(Date.now() + 60_000));
+}
+
+async function replaceSameSizeWithRestoredMetadata(mockPi: MockPi, outputPath: string, contents: string): Promise<void> {
+	await waitForMockSpawn(mockPi);
+	const before = fs.statSync(outputPath);
+	assert.equal(Buffer.byteLength(contents), before.size, "replacement must retain byte size");
+	fs.writeFileSync(outputPath, contents, "utf8");
+	fs.utimesSync(outputPath, before.atime, before.mtime);
 }
 
 async function waitForAsyncResult(id: string, timeoutMs = 10_000): Promise<Record<string, unknown>> {
@@ -121,7 +138,7 @@ describe("file-only acceptance", () => {
 		}
 	});
 
-	it("still rejects missing, malformed, and unchanged configured output without scanning another file", async (t) => {
+	it("uses changed configured content but rejects stale/malformed output without scanning another file", async (t) => {
 		await t.test("missing configured file", async () => {
 			const outputPath = path.join(tempDir, "missing.md");
 			mockPi.onCall({ output: INLINE_ONLY });
@@ -163,6 +180,56 @@ describe("file-only acceptance", () => {
 			assert.equal(result.exitCode, 1);
 			assert.equal(result.acceptance?.status, "rejected");
 			assert.match(result.acceptance?.childReportParseError ?? "", /Failed to parse acceptance-report/);
+		});
+
+		await t.test("touch-only stale output remains inline-authoritative", async () => {
+			const outputPath = path.join(tempDir, "touch-only-stale.md");
+			fs.writeFileSync(outputPath, validReport(), "utf8");
+			mockPi.onCall({ delay: 150, output: INLINE_ONLY });
+			const touch = touchAfterSnapshot(mockPi, outputPath);
+			const result = await runSync(tempDir, makeAgentConfigs(["ydtb-reviewer"]), "ydtb-reviewer", "Review only.", {
+				outputPath,
+				outputMode: "file-only",
+				acceptance: { level: "attested" },
+			});
+			await touch;
+			assert.equal(result.exitCode, 1);
+			assert.equal(result.acceptance?.status, "rejected");
+			assert.equal(fs.readFileSync(outputPath, "utf8"), INLINE_ONLY);
+		});
+
+		await t.test("same-size changed background output with restored metadata remains authoritative", { skip: !isAsyncAvailable() ? "async runner unavailable" : undefined }, async () => {
+			const id = `issue136-same-size-${Date.now().toString(36)}`;
+			const outputPath = path.join(tempDir, "same-size.md");
+			const changedReport = sameSizeDifferentReport();
+			assert.equal(Buffer.byteLength(changedReport), Buffer.byteLength(validReport()));
+			fs.writeFileSync(outputPath, validReport(), "utf8");
+			mockPi.onCall({ delay: 150, output: INLINE_ONLY });
+			const replace = replaceSameSizeWithRestoredMetadata(mockPi, outputPath, changedReport);
+			try {
+				executeAsyncSingle(id, {
+					agent: "ydtb-reviewer",
+					task: "Review only.",
+					agentConfig: makeAgent("ydtb-reviewer"),
+					ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "issue136-test" },
+					artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+					shareEnabled: false,
+					sessionRoot: path.join(tempDir, "sessions"),
+					output: outputPath,
+					outputMode: "file-only",
+					acceptance: { level: "attested" },
+					maxSubagentDepth: 2,
+				});
+				await replace;
+				const payload = await waitForAsyncResult(id);
+				const [result] = payload.results as Array<{ success?: boolean; acceptance?: { status?: string } }>;
+				assert.equal(payload.success, true);
+				assert.equal(result?.acceptance?.status, "attested");
+				assert.equal(fs.readFileSync(outputPath, "utf8"), changedReport);
+			} finally {
+				fs.rmSync(path.join(ASYNC_DIR, id), { recursive: true, force: true });
+				fs.rmSync(path.join(RESULTS_DIR, `${id}.json`), { force: true });
+			}
 		});
 
 		await t.test("unchanged stale output and unrelated valid report", async () => {
